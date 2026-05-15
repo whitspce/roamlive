@@ -1,8 +1,27 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
+
+val keystoreProperties = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) load(FileInputStream(f))
+}
+
+// Signing creds resolution order: env vars first, then keystore.properties file.
+// Env vars are preferred — they live only in the shell session, never on disk.
+fun signingCred(envVar: String, propKey: String): String? =
+    System.getenv(envVar) ?: keystoreProperties.getProperty(propKey)
+
+val resolvedStoreFile = signingCred("ROAM_STORE_FILE", "storeFile")
+val resolvedStorePassword = signingCred("ROAM_STORE_PASSWORD", "storePassword")
+val resolvedKeyAlias = signingCred("ROAM_KEY_ALIAS", "keyAlias")
+val resolvedKeyPassword = signingCred("ROAM_KEY_PASSWORD", "keyPassword")
+val hasSigningCreds = resolvedStoreFile != null && resolvedStorePassword != null
 
 android {
     namespace = "dev.whitespc.roam"
@@ -12,8 +31,19 @@ android {
         applicationId = "dev.whitespc.roam"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "0.1.3"
+    }
+
+    signingConfigs {
+        create("release") {
+            if (hasSigningCreds) {
+                storeFile = file(resolvedStoreFile!!)
+                storePassword = resolvedStorePassword
+                keyAlias = resolvedKeyAlias
+                keyPassword = resolvedKeyPassword
+            }
+        }
     }
 
     buildTypes {
@@ -23,6 +53,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            if (hasSigningCreds) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
