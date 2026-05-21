@@ -81,7 +81,7 @@ import dev.whitespc.roam.ui.theme.RoamLive
 import dev.whitespc.roam.ui.theme.RoamMuted
 import kotlinx.coroutines.delay
 
-private enum class Screen { Main, Settings }
+private enum class Screen { Main, Settings, Overlays }
 
 @Composable
 fun StreamScreen(modifier: Modifier = Modifier) {
@@ -97,7 +97,14 @@ fun StreamScreen(modifier: Modifier = Modifier) {
                 Screen.Main -> StreamSurface(onOpenSettings = { screen = Screen.Settings })
                 Screen.Settings -> {
                     BackHandler { screen = Screen.Main }
-                    SettingsScreen(onClose = { screen = Screen.Main })
+                    SettingsScreen(
+                        onClose = { screen = Screen.Main },
+                        onOpenOverlays = { screen = Screen.Overlays },
+                    )
+                }
+                Screen.Overlays -> {
+                    BackHandler { screen = Screen.Settings }
+                    OverlayEditorScreen(onClose = { screen = Screen.Settings })
                 }
             }
         }

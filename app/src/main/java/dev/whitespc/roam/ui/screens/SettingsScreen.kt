@@ -22,8 +22,10 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.FilterChip
@@ -72,7 +74,10 @@ private val Resolutions = listOf(
 private val FpsOptions = listOf(30, 60)
 
 @Composable
-fun SettingsScreen(onClose: () -> Unit) {
+fun SettingsScreen(
+    onClose: () -> Unit,
+    onOpenOverlays: () -> Unit,
+) {
     val context = LocalContext.current
 
     var streamUrl by remember { mutableStateOf(Prefs.streamUrl(context)) }
@@ -280,6 +285,37 @@ fun SettingsScreen(onClose: () -> Unit) {
                         options = listOf(30 to "30s", 60 to "60s"),
                         selected = stealthPulseSec,
                         onSelect = { stealthPulseSec = it },
+                    )
+                }
+            }
+            Section(title = "Overlays") {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onOpenOverlays() }
+                        .padding(vertical = 8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Layers,
+                        contentDescription = null,
+                        tint = RoamLive,
+                        modifier = Modifier.size(22.dp),
+                    )
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        FieldLabel("Overlay editor")
+                        Text(
+                            text = "Add text and images on top of your broadcast.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.sp,
+                        )
+                    }
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
                     )
                 }
             }
