@@ -58,7 +58,7 @@ class StreamingService : Service() {
     }
 
     private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
-        .setContentTitle("Roam — Live")
+        .setContentTitle("Roam Live")
         .setContentText("Streaming in progress")
         .setSmallIcon(android.R.drawable.presence_video_online)
         .setOngoing(true)

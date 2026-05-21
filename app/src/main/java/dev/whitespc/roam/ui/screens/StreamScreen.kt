@@ -24,9 +24,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Coffee
+import androidx.compose.material.icons.filled.FlashlightOff
+import androidx.compose.material.icons.filled.FlashlightOn
 import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
@@ -63,6 +66,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import dev.whitespc.roam.chat.ChatManager
 import dev.whitespc.roam.storage.Prefs
+import dev.whitespc.roam.streaming.DualCameraSupport
 import dev.whitespc.roam.streaming.StreamState
 import dev.whitespc.roam.streaming.StreamingEngine
 import dev.whitespc.roam.streaming.StreamingService
@@ -132,6 +136,9 @@ private fun StreamSurface(onOpenSettings: () -> Unit) {
     val isMuted by engine.isMuted.collectAsState()
     val isCameraOff by engine.isCameraOff.collectAsState()
     val isBrb by engine.isBrb.collectAsState()
+    val isTorchOn by engine.isTorchOn.collectAsState()
+    val isDualCamOn by engine.isDualCamOn.collectAsState()
+    val dualCamSupported = remember { DualCameraSupport.isSupported(context) }
     val thermalNotice by engine.thermalNotice.collectAsState()
     var stealthActive by remember { mutableStateOf(false) }
 
@@ -142,7 +149,9 @@ private fun StreamSurface(onOpenSettings: () -> Unit) {
         ChatManager.setTwitchChannel(if (chatEnabled) twitchChannel.trim() else null)
     }
 
-    val streamActive = state is StreamState.Live || state == StreamState.Connecting
+    val streamActive = state is StreamState.Live ||
+        state == StreamState.Connecting ||
+        state is StreamState.Reconnecting
     LiveScreenEffect(active = streamActive)
 
     LaunchedEffect(state) {
@@ -155,6 +164,15 @@ private fun StreamSurface(onOpenSettings: () -> Unit) {
         if (state is StreamState.Error) {
             delay(8000)
             if (engine.state.value === state) engine.clearError()
+        }
+    }
+
+    LaunchedEffect(state) {
+        if (state === StreamState.Connecting) {
+            delay(30_000)
+            if (engine.state.value === StreamState.Connecting) {
+                engine.failConnectingTimeout()
+            }
         }
     }
 
@@ -202,8 +220,22 @@ private fun StreamSurface(onOpenSettings: () -> Unit) {
                 }
                 IconChip(
                     icon = Icons.Filled.FlipCameraAndroid,
-                    description = "Switch camera",
+                    description = if (isDualCamOn) "Swap main and PiP cameras" else "Switch camera",
                     onClick = { engine.switchCamera() },
+                )
+                if (dualCamSupported) {
+                    IconChip(
+                        icon = Icons.Filled.PictureInPictureAlt,
+                        description = if (isDualCamOn) "Turn dual camera off" else "Turn dual camera on",
+                        onClick = { engine.toggleDualCam() },
+                        accent = if (isDualCamOn) RoamLive else null,
+                    )
+                }
+                IconChip(
+                    icon = if (isTorchOn) Icons.Filled.FlashlightOn else Icons.Filled.FlashlightOff,
+                    description = if (isTorchOn) "Turn torch off" else "Turn torch on",
+                    onClick = { engine.toggleTorch() },
+                    accent = if (isTorchOn) RoamLive else null,
                 )
                 IconChip(
                     icon = if (isMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
@@ -245,10 +277,10 @@ private fun StreamSurface(onOpenSettings: () -> Unit) {
 
             LiveButton(
                 state = state,
-                enabled = streamActive || Prefs.streamUrl(context).isNotBlank(),
+                enabled = streamActive || Prefs.streamUrls(context).isNotEmpty(),
                 onGoLive = {
                     StreamingService.start(context)
-                    engine.start(Prefs.streamUrl(context).trim())
+                    engine.start(Prefs.streamUrls(context))
                 },
                 onStop = {
                     engine.stop()
@@ -296,13 +328,20 @@ private fun StatusPill(state: StreamState, elapsedSec: Int, modifier: Modifier =
         is StreamState.Live -> {
             val timeChunk = if (elapsedSec > 0) "  ${formatElapsed(elapsedSec)}" else ""
             val kbps = (state.bitrateBps / 1000L).coerceAtLeast(0L)
+            val ratio = if (state.totalCount > 1) " ${state.connectedCount}/${state.totalCount}" else ""
             PillStyle(
-                label = "LIVE$timeChunk  $kbps kbps",
+                label = "LIVE$ratio$timeChunk  $kbps kbps",
                 dotColor = Color.White,
                 backgroundColor = RoamLive,
                 textColor = Color.White,
             )
         }
+        is StreamState.Reconnecting -> PillStyle(
+            label = "RECONNECTING  attempt ${state.attempt}",
+            dotColor = RoamConnecting,
+            backgroundColor = Color.Black.copy(alpha = 0.55f),
+            textColor = MaterialTheme.colorScheme.onBackground,
+        )
         is StreamState.Error -> PillStyle(
             label = "ERROR  ${state.reason.take(60)}",
             dotColor = RoamConnecting,
@@ -422,7 +461,9 @@ private fun LiveButton(
     onStop: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val streaming = state is StreamState.Live || state == StreamState.Connecting
+    val streaming = state is StreamState.Live ||
+        state == StreamState.Connecting ||
+        state is StreamState.Reconnecting
     val backgroundColor = when {
         !enabled -> MaterialTheme.colorScheme.surfaceVariant
         streaming -> RoamLive

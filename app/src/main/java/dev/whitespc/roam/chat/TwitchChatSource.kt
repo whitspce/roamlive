@@ -2,9 +2,16 @@ package dev.whitespc.roam.chat
 
 import android.graphics.Color
 import android.util.Log
+import dev.whitespc.roam.NetworkMonitor
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -35,8 +42,38 @@ class TwitchChatSource(private val channelName: String) : ChatSource {
     override suspend fun connect() {
         val channel = channelName.lowercase().trim()
         if (channel.isBlank()) return
+        var attempt = 0
+        while (currentCoroutineContext().isActive) {
+            attempt++
+            Log.d(TAG, "connect attempt $attempt for #$channel")
+            val closed = CompletableDeferred<Unit>()
+            val ws = openSocket(channel, closed)
+            webSocket = ws
+            try {
+                closed.await()
+                Log.d(TAG, "ws closed, will retry")
+            } finally {
+                runCatching { ws.close(1000, "shutdown") }
+                webSocket = null
+            }
+            if (!currentCoroutineContext().isActive) return
+            // First wait until network is up — returns immediately if it already is.
+            NetworkMonitor.isAvailable.filter { it }.first()
+            if (!currentCoroutineContext().isActive) return
+            // Then a brief backoff so we don't hammer if the failure is server-side
+            // rather than network-side.
+            delay(if (attempt <= 3) 1000L else 5000L)
+        }
+    }
+
+    override suspend fun disconnect() {
+        runCatching { webSocket?.close(1000, "client disconnect") }
+        webSocket = null
+    }
+
+    private fun openSocket(channel: String, closed: CompletableDeferred<Unit>): WebSocket {
         val request = Request.Builder().url(IRC_URL).build()
-        webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
+        return httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 val nick = "justinfan${Random.nextInt(10_000, 99_999)}"
                 ws.send("CAP REQ :twitch.tv/tags")
@@ -53,17 +90,18 @@ class TwitchChatSource(private val channelName: String) : ChatSource {
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                 Log.w(TAG, "ws failure", t)
+                closed.complete(Unit)
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 Log.d(TAG, "ws closed $code $reason")
+                closed.complete(Unit)
+            }
+
+            override fun onClosing(ws: WebSocket, code: Int, reason: String) {
+                Log.d(TAG, "ws closing $code $reason")
             }
         })
-    }
-
-    override suspend fun disconnect() {
-        webSocket?.close(1000, "client disconnect")
-        webSocket = null
     }
 
     private fun handleLine(ws: WebSocket, line: String) {

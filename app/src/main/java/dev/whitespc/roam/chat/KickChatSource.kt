@@ -2,10 +2,17 @@ package dev.whitespc.roam.chat
 
 import android.graphics.Color
 import android.util.Log
+import dev.whitespc.roam.NetworkMonitor
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -39,22 +46,41 @@ class KickChatSource(private val channelName: String) : ChatSource {
         .build()
 
     private var webSocket: WebSocket? = null
-    private var chatroomId: Long = -1
 
     override suspend fun connect() {
         Log.d(TAG, "connect() entered for channel '$channelName'")
-        val resolved = fetchChatroomId(channelName)
-        Log.d(TAG, "fetchChatroomId returned ${resolved ?: "null"}")
-        if (resolved == null) {
-            Log.w(TAG, "could not resolve chatroom for $channelName")
-            return
+        var attempt = 0
+        while (currentCoroutineContext().isActive) {
+            attempt++
+            val chatroomId = fetchChatroomId(channelName)
+            if (chatroomId == null) {
+                Log.w(TAG, "chatroom fetch failed for $channelName (attempt $attempt)")
+                if (!currentCoroutineContext().isActive) return
+                NetworkMonitor.isAvailable.filter { it }.first()
+                if (!currentCoroutineContext().isActive) return
+                delay(if (attempt <= 3) 1000L else 5000L)
+                continue
+            }
+            Log.d(TAG, "connecting ws for chatroom $chatroomId (attempt $attempt)")
+            val closed = CompletableDeferred<Unit>()
+            val ws = openWebSocket(chatroomId, closed)
+            webSocket = ws
+            try {
+                closed.await()
+                Log.d(TAG, "ws closed, will retry")
+            } finally {
+                runCatching { ws.close(1000, "shutdown") }
+                webSocket = null
+            }
+            if (!currentCoroutineContext().isActive) return
+            NetworkMonitor.isAvailable.filter { it }.first()
+            if (!currentCoroutineContext().isActive) return
+            delay(if (attempt <= 3) 1000L else 5000L)
         }
-        chatroomId = resolved
-        openWebSocket(resolved)
     }
 
     override suspend fun disconnect() {
-        webSocket?.close(1000, "client disconnect")
+        runCatching { webSocket?.close(1000, "client disconnect") }
         webSocket = null
     }
 
@@ -81,12 +107,12 @@ class KickChatSource(private val channelName: String) : ChatSource {
         }
     }
 
-    private fun openWebSocket(chatroomId: Long) {
+    private fun openWebSocket(chatroomId: Long, closed: CompletableDeferred<Unit>): WebSocket {
         val request = Request.Builder()
             .url(PUSHER_URL)
             .header("User-Agent", USER_AGENT)
             .build()
-        webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
+        return httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 Log.d(TAG, "ws onOpen (${response.code})")
                 ws.send(
@@ -100,10 +126,12 @@ class KickChatSource(private val channelName: String) : ChatSource {
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                 Log.w(TAG, "ws failure (response code ${response?.code})", t)
+                closed.complete(Unit)
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 Log.d(TAG, "ws closed $code $reason")
+                closed.complete(Unit)
             }
 
             override fun onClosing(ws: WebSocket, code: Int, reason: String) {

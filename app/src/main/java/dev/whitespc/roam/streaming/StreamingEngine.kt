@@ -1,28 +1,43 @@
 package dev.whitespc.roam.streaming
 
 import android.content.Context
-import android.graphics.BitmapFactory
 import android.graphics.Color as AndroidColor
 import android.os.Build
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import android.view.MotionEvent
 import com.pedro.common.AudioCodec
 import com.pedro.common.ConnectChecker
 import com.pedro.common.VideoCodec
 import com.pedro.encoder.input.gl.render.filters.BlackFilterRender
-import com.pedro.encoder.input.gl.render.filters.`object`.ImageObjectFilterRender
 import com.pedro.encoder.input.gl.render.filters.`object`.TextObjectFilterRender
 import com.pedro.encoder.input.sources.audio.MicrophoneSource
 import com.pedro.encoder.input.sources.video.Camera2Source
 import com.pedro.encoder.utils.gl.TranslateTo
 import com.pedro.library.generic.GenericStream
+import com.pedro.library.util.streamclient.GenericStreamClient
 import com.pedro.library.view.OpenGlView
-import dev.whitespc.roam.R
+import dev.whitespc.roam.NetworkMonitor
 import dev.whitespc.roam.storage.Prefs
+import dev.whitespc.roam.streaming.overlay.OverlayRenderer
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val TAG = "RoamStreamingEngine"
 
@@ -31,6 +46,10 @@ private const val AUDIO_BITRATE = 128_000
 private const val AUDIO_SAMPLE_RATE = 44_100
 private const val AUDIO_STEREO = true
 
+// Single-destination for now. Multi-destination via MultiStream was failing to surface
+// any connect-level logs; reverted to GenericStream while we diagnose. Multi can come
+// back later either via per-platform GenericStream instances or by figuring out why
+// MultiStream's RtmpClient.connect was silently no-op'ing.
 class StreamingEngine(private val context: Context) {
     private val _state = MutableStateFlow<StreamState>(StreamState.Idle)
     val state: StateFlow<StreamState> = _state.asStateFlow()
@@ -43,6 +62,9 @@ class StreamingEngine(private val context: Context) {
 
     private val _isBrb = MutableStateFlow(false)
     val isBrb: StateFlow<Boolean> = _isBrb.asStateFlow()
+
+    private val _isTorchOn = MutableStateFlow(false)
+    val isTorchOn: StateFlow<Boolean> = _isTorchOn.asStateFlow()
 
     private val _thermalNotice = MutableStateFlow<String?>(null)
     val thermalNotice: StateFlow<String?> = _thermalNotice.asStateFlow()
@@ -59,33 +81,77 @@ class StreamingEngine(private val context: Context) {
             null
         }
 
+    private var stopRequested = false
+
+    // Reconnect state. `wantStreaming` is the user's intent (set by start, cleared by stop).
+    // `hasEverConnected` ensures we only auto-reconnect after a stream that successfully
+    // went live at least once — initial connect failures still surface as Error so users
+    // can fix a bad URL/key rather than have us silently retry forever.
+    private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var wantStreaming = false
+    private var hasEverConnected = false
+    private var lastStreamUrl: String? = null
+    private var reconnectJob: Job? = null
+    private var isReconnecting = false
+    /** Tracks the outcome of the CURRENT reconnect attempt. The ConnectChecker
+     *  completes this when either onConnectionSuccess (true) or onConnectionFailed
+     *  (false) fires — so the loop wakes immediately instead of polling state. */
+    private var currentAttemptOutcome: CompletableDeferred<Boolean>? = null
+
     private val connectChecker = object : ConnectChecker {
         override fun onConnectionStarted(url: String) {
-            Log.d(TAG, "connection started")
+            Log.d(TAG, "connection started: $url")
         }
 
         override fun onConnectionSuccess() {
-            _state.value = StreamState.Live(0)
+            Log.d(TAG, "connection success")
+            if (stopRequested) return
+            hasEverConnected = true
+            // Signal the reconnect loop (if any) that this attempt succeeded.
+            currentAttemptOutcome?.complete(true)
+            _state.value = StreamState.Live(0, connectedCount = 1, totalCount = 1)
         }
 
         override fun onConnectionFailed(reason: String) {
             Log.w(TAG, "connection failed: $reason")
+            if (stopRequested) return
+            if (isReconnecting) {
+                // Inside a reconnect attempt — signal failure so the loop wakes up
+                // immediately and retries instead of timing out a fixed wait.
+                currentAttemptOutcome?.complete(false)
+                return
+            }
+            if (wantStreaming && hasEverConnected) {
+                // First failure after a successful stream: kick off reconnect.
+                startReconnect()
+                return
+            }
             _state.value = StreamState.Error(reason)
         }
 
         override fun onNewBitrate(bitrate: Long) {
+            if (stopRequested) return
             val current = _state.value
             if (current is StreamState.Live) {
-                _state.value = StreamState.Live(bitrate)
+                _state.value = current.copy(bitrateBps = bitrate)
             }
         }
 
         override fun onDisconnect() {
-            _state.value = StreamState.Idle
+            Log.d(TAG, "disconnect")
+            if (stopRequested) return
+            if (isReconnecting) return
+            if (wantStreaming && hasEverConnected) {
+                // Surprise disconnect mid-stream: try to recover.
+                startReconnect()
+            }
         }
 
         override fun onAuthError() {
-            _state.value = StreamState.Error("Authentication failed")
+            Log.w(TAG, "auth error")
+            if (!stopRequested) {
+                _state.value = StreamState.Error("Authentication failed")
+            }
         }
 
         override fun onAuthSuccess() {
@@ -96,6 +162,9 @@ class StreamingEngine(private val context: Context) {
     val stream: GenericStream = GenericStream(context, connectChecker).apply {
         setVideoCodec(VideoCodec.H264)
         setAudioCodec(AudioCodec.AAC)
+        runCatching {
+            (getStreamClient() as? GenericStreamClient)?.setLogs(true)
+        }
     }
 
     private var blackFilter: BlackFilterRender? = null
@@ -104,13 +173,33 @@ class StreamingEngine(private val context: Context) {
     private var brbTextFilter: TextObjectFilterRender? = null
     private var muteBeforeBrb = false
 
-    private var watermarkFilter: ImageObjectFilterRender? = null
+    private val dualCamera = DualCameraController(context, stream)
+    val isDualCamOn: StateFlow<Boolean> = dualCamera.isOn
+
+    private val overlayRenderer = OverlayRenderer(context, stream)
+    /** Tracks which way the main camera (the encoder's video source) is currently
+     *  facing. Camera2Source defaults to BACK, so we start at false (back). Flipped
+     *  whenever switchCamera runs. Needed so we can enable PiP with the OPPOSITE
+     *  facing — two cameras with the same facing can't be opened concurrently. */
+    private var mainFacingFront = false
 
     private var isPrepared = false
 
     init {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && thermalListener != null) {
             powerManager?.addThermalStatusListener(thermalListener)
+        }
+        // Watch for the OS reporting network loss while we're live, and proactively
+        // enter Reconnecting state instead of waiting ~75s for RTMP's TCP timeout.
+        // drop(1) skips the initial StateFlow value so we only react to actual changes.
+        engineScope.launch {
+            NetworkMonitor.isAvailable.drop(1).collect { available ->
+                if (!available && wantStreaming && _state.value is StreamState.Live) {
+                    Log.d(TAG, "network lost while live, entering reconnect proactively")
+                    runCatching { if (stream.isStreaming) stream.stopStream() }
+                    startReconnect()
+                }
+            }
         }
     }
 
@@ -139,19 +228,10 @@ class StreamingEngine(private val context: Context) {
             }
             isPrepared = true
 
-            // Permanent watermark — burned into preview and broadcast.
-            // No setting to disable for now; promotional / word-of-mouth.
-            runCatching {
-                val bitmap = BitmapFactory.decodeResource(context.resources, R.drawable.watermark)
-                val wm = ImageObjectFilterRender().apply {
-                    setImage(bitmap)
-                    // 4:1 PNG; ~28% width / 7% height of the frame
-                    setScale(28f, 7f)
-                    setPosition(TranslateTo.BOTTOM_RIGHT)
-                }
-                stream.getGlInterface().addFilter(wm)
-                watermarkFilter = wm
-            }.onFailure { Log.w(TAG, "watermark add failed", it) }
+            // Apply the persistent overlay scene (watermark + any user-added items).
+            // BRB / camera-off / dual-cam PiP stay as separate mode-based filters
+            // managed elsewhere in this class — they're not part of the scene.
+            overlayRenderer.applyScene(Prefs.overlayScene(context))
         }
         if (stream.isOnPreview) stream.stopPreview()
         stream.startPreview(view)
@@ -161,22 +241,49 @@ class StreamingEngine(private val context: Context) {
         if (stream.isOnPreview) stream.stopPreview()
     }
 
-    fun start(url: String) {
-        if (stream.isStreaming) return
+    fun start(urls: List<String>) {
+        val current = _state.value
+        if (current is StreamState.Live ||
+            current is StreamState.Connecting ||
+            current is StreamState.Reconnecting
+        ) return
+
         if (!stream.isOnPreview) {
             _state.value = StreamState.Error("Camera not ready")
             return
         }
-        if (url.isBlank()) {
-            _state.value = StreamState.Error("Stream URL is empty")
+        val url = urls.firstOrNull { it.isNotBlank() }?.trim()
+        if (url.isNullOrBlank()) {
+            _state.value = StreamState.Error("No stream URL configured")
             return
         }
+        if (urls.count { it.isNotBlank() } > 1) {
+            Log.w(TAG, "multi-destination temporarily disabled, using first URL only")
+        }
+
+        // Force-stop any lingering stream from a previous aborted attempt.
+        runCatching { if (stream.isStreaming) stream.stopStream() }
+
+        stopRequested = false
+        wantStreaming = true
+        hasEverConnected = false
+        lastStreamUrl = url
         _state.value = StreamState.Connecting
-        stream.startStream(url)
+        runCatching { stream.startStream(url) }
+            .onFailure { t ->
+                Log.w(TAG, "startStream threw", t)
+                _state.value = StreamState.Error(t.message ?: "Stream start failed")
+                wantStreaming = false
+            }
     }
 
     fun stop() {
-        if (stream.isStreaming) stream.stopStream()
+        stopRequested = true
+        wantStreaming = false
+        reconnectJob?.cancel()
+        reconnectJob = null
+        isReconnecting = false
+        runCatching { if (stream.isStreaming) stream.stopStream() }
         _state.value = StreamState.Idle
     }
 
@@ -184,18 +291,211 @@ class StreamingEngine(private val context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && thermalListener != null) {
             powerManager?.removeThermalStatusListener(thermalListener)
         }
-        if (stream.isStreaming) stream.stopStream()
+        stopRequested = true
+        wantStreaming = false
+        reconnectJob?.cancel()
+        reconnectJob = null
+        isReconnecting = false
+        dualCamera.release()
+        overlayRenderer.clear()
+        runCatching { if (stream.isStreaming) stream.stopStream() }
         if (stream.isOnPreview) stream.stopPreview()
+        engineScope.cancel()
     }
 
     fun clearError() {
         if (_state.value is StreamState.Error) {
+            stopRequested = true
+            wantStreaming = false
+            runCatching { if (stream.isStreaming) stream.stopStream() }
             _state.value = StreamState.Idle
         }
     }
 
+    fun failConnectingTimeout() {
+        if (_state.value === StreamState.Connecting) {
+            stopRequested = true
+            wantStreaming = false
+            runCatching { if (stream.isStreaming) stream.stopStream() }
+            _state.value = StreamState.Error(
+                "Connection timed out. Check your stream URL and network.",
+            )
+        }
+    }
+
+    /** Launch the reconnect loop. Called from ConnectChecker when we detect an
+     *  unexpected drop after we'd successfully gone live. Does nothing if already
+     *  reconnecting. */
+    private fun startReconnect() {
+        if (isReconnecting) return
+        val url = lastStreamUrl ?: return
+        val maxSec = Prefs.maxReconnectMinutes(context) * 60
+        isReconnecting = true
+        reconnectJob = engineScope.launch {
+            try {
+                reconnectLoop(url, maxSec)
+            } finally {
+                isReconnecting = false
+            }
+        }
+    }
+
+    /** The retry loop. Two key design points learned the hard way:
+     *
+     *  1. **Wait on isAvailable as a StateFlow**, not on the edge-triggered onAvailable
+     *     SharedFlow. `isAvailable.filter { it }.first()` returns immediately if network
+     *     is currently up. The previous version waited for the next UP edge, which
+     *     never came after the first one — so subsequent attempts ate the full 30s
+     *     timeout before retrying.
+     *
+     *  2. **Per-attempt outcome via CompletableDeferred**, so the loop wakes the
+     *     instant the ConnectChecker fires success or failure. The previous version
+     *     polled state every 500ms for 10 seconds before deciding the attempt failed.
+     *
+     *  Result: the loop is responsive to both real-world events (network comes back,
+     *  connection succeeds, connection fails) without polling or unnecessary waits.
+     */
+    private suspend fun reconnectLoop(url: String, maxSeconds: Int) {
+        val startTime = SystemClock.elapsedRealtime()
+        var attempt = 0
+
+        while (engineScope.isActive && wantStreaming) {
+            val elapsedSec = ((SystemClock.elapsedRealtime() - startTime) / 1000).toInt()
+            if (maxSeconds > 0 && elapsedSec >= maxSeconds) {
+                _state.value = StreamState.Error(
+                    "Reconnect failed after ${maxSeconds / 60} min",
+                )
+                wantStreaming = false
+                return
+            }
+
+            attempt++
+            val secondsRemaining = if (maxSeconds == 0) Int.MAX_VALUE else (maxSeconds - elapsedSec)
+            _state.value = StreamState.Reconnecting(attempt, secondsRemaining)
+
+            // Step 1: wait until network is up. Returns immediately if it already is.
+            val timeRemainingMs = if (maxSeconds > 0) {
+                (maxSeconds - elapsedSec) * 1000L
+            } else {
+                Long.MAX_VALUE
+            }
+            val gotNetwork = withTimeoutOrNull(timeRemainingMs) {
+                NetworkMonitor.isAvailable.filter { it }.first()
+            }
+            if (gotNetwork == null) continue  // outer loop hits maxSeconds check
+            if (!wantStreaming) return
+
+            // Step 2: small backoff. Two reasons:
+            //  - Lets the OS finish bringing up DNS / routes after the network signal
+            //  - Throttles us against the RTMP server if it's also recovering
+            // Shorter on first few attempts (be aggressive), longer if we've been at
+            // this a while (don't hammer).
+            val backoffMs = if (attempt <= 3) 1000L else 3000L
+            delay(backoffMs)
+            if (!wantStreaming) return
+            // Network might have dropped again during our backoff — go around if so.
+            if (!NetworkMonitor.isAvailable.value) continue
+
+            // Step 3: try to connect, with an outcome signal the checker fills in.
+            val outcome = CompletableDeferred<Boolean>()
+            currentAttemptOutcome = outcome
+            Log.d(TAG, "reconnect attempt $attempt (elapsed ${elapsedSec}s)")
+            runCatching {
+                if (stream.isStreaming) stream.stopStream()
+                stream.startStream(url)
+            }.onFailure { t ->
+                Log.w(TAG, "reconnect attempt $attempt threw", t)
+                outcome.complete(false)
+            }
+
+            // Step 4: wait for the outcome. Cap at 15s in case neither callback fires
+            // (e.g. RTMP server accepts the TCP socket then hangs without replying).
+            val succeeded = withTimeoutOrNull(15_000L) { outcome.await() }
+            currentAttemptOutcome = null
+            when (succeeded) {
+                true -> return  // state was set to Live by the checker, we're done
+                false -> {
+                    // Failed fast — loop will immediately try again. No long wait.
+                    Log.d(TAG, "reconnect attempt $attempt failed, retrying")
+                }
+                null -> {
+                    // Connect hung past 15s — give up on this attempt, retry.
+                    Log.d(TAG, "reconnect attempt $attempt timed out, retrying")
+                    runCatching { if (stream.isStreaming) stream.stopStream() }
+                }
+            }
+        }
+    }
+
     fun switchCamera() {
-        (stream.videoSource as? Camera2Source)?.switchCamera()
+        if (isDualCamOn.value) {
+            dualCamera.swap()
+            mainFacingFront = !mainFacingFront
+        } else {
+            (stream.videoSource as? Camera2Source)?.switchCamera()
+            mainFacingFront = !mainFacingFront
+        }
+        // Any camera reconfiguration drops the torch (either the camera's lantern
+        // dies with the closed session, or our setTorchMode is killed when the new
+        // session opens). Reset the icon to match.
+        _isTorchOn.value = false
+    }
+
+    fun toggleDualCam() {
+        // Fire-and-forget; the controller's StateFlow updates when the operation
+        // actually completes, and the UI binds to that — no stale icon state.
+        if (isDualCamOn.value) {
+            // Disabling. If main is front-facing, the rear camera (which may have
+            // had torch on) was on the PiP slot — it's about to be released, so
+            // the torch dies with it and we have to reset the icon to match.
+            // If main is rear, the main camera doesn't change, so torch persists.
+            if (mainFacingFront && _isTorchOn.value) _isTorchOn.value = false
+            dualCamera.disable()
+        } else {
+            // Enabling. Main camera doesn't change, just adds PiP. Torch on main
+            // (if it was on) keeps running, so no state reset needed.
+            // PiP must face opposite of main, otherwise two cameras try to open
+            // the same physical camera and the concurrent API fails.
+            dualCamera.enable(facingFront = !mainFacingFront)
+        }
+    }
+
+    fun toggleTorch() {
+        val newState = !_isTorchOn.value
+        val openRear = openRearCamera()
+        val ok = if (openRear != null) {
+            // Common case: we hold the rear camera open (preview / streaming /
+            // dual-cam). Toggle torch via that session.
+            runCatching {
+                if (newState) openRear.enableLantern() else openRear.disableLantern()
+                true
+            }.getOrElse {
+                Log.w(TAG, "enableLantern failed", it)
+                false
+            }
+        } else {
+            // Niche case: main is front-facing and dual-cam is off, so no rear
+            // camera is open by us. Fall back to the system torch API.
+            TorchController.setTorch(context, newState)
+        }
+        if (ok) _isTorchOn.value = newState
+    }
+
+    /**
+     * Returns whichever Camera2Source has the rear-facing camera open, if any.
+     * Used by the torch toggle to target the right session. Logic:
+     *  - Single cam, main is rear → main
+     *  - Single cam, main is front → null (no rear cam open by us)
+     *  - Dual cam, main is rear (PiP front) → main
+     *  - Dual cam, main is front (PiP rear) → PiP
+     */
+    private fun openRearCamera(): Camera2Source? {
+        return if (isDualCamOn.value) {
+            if (!mainFacingFront) stream.videoSource as? Camera2Source
+            else dualCamera.pipCameraOrNull
+        } else {
+            if (!mainFacingFront) stream.videoSource as? Camera2Source else null
+        }
     }
 
     fun toggleCameraOff() {
@@ -205,17 +505,21 @@ class StreamingEngine(private val context: Context) {
                 gl.unMuteVideo()
                 blackFilter?.let { gl.removeFilter(it) }
                 blackFilter = null
+                dualCamera.setPipVisible(true)
             }
                 .onSuccess { _isCameraOff.value = false }
                 .onFailure { Log.w(TAG, "camera-on failed", it) }
         } else {
             runCatching {
-                // muteVideo() blacks the encoder path (stream + record);
-                // BlackFilterRender blacks the on-device preview.
+                // muteVideo blacks the encoder feed for the main camera, and the
+                // BlackFilterRender blacks the on-device preview. Need to hide PiP
+                // too — otherwise the corner cam still shows in the broadcast on
+                // top of an otherwise-black frame.
                 gl.muteVideo()
                 val filter = BlackFilterRender()
                 gl.addFilter(filter)
                 blackFilter = filter
+                dualCamera.setPipVisible(false)
             }
                 .onSuccess { _isCameraOff.value = true }
                 .onFailure { Log.w(TAG, "camera-off failed", it) }
@@ -252,6 +556,7 @@ class StreamingEngine(private val context: Context) {
                 brbBlackFilter?.let { gl.removeFilter(it) }
                 brbTextFilter = null
                 brbBlackFilter = null
+                dualCamera.setPipVisible(true)
                 if (!muteBeforeBrb && _isMuted.value) {
                     mic?.unMute()
                     _isMuted.value = false
@@ -278,6 +583,10 @@ class StreamingEngine(private val context: Context) {
                 gl.addFilter(1, text)
                 brbBlackFilter = black
                 brbTextFilter = text
+                // PiP filter has a higher index in the GL chain, so it draws on
+                // top of our BRB black. Hide it explicitly so the streamer's whole
+                // broadcast goes to the BRB screen, not just the main camera area.
+                dualCamera.setPipVisible(false)
                 muteBeforeBrb = _isMuted.value
                 if (!_isMuted.value) {
                     mic?.mute()
@@ -301,17 +610,17 @@ class StreamingEngine(private val context: Context) {
             PowerManager.THERMAL_STATUS_MODERATE -> {
                 val target = (configuredBitrate * 0.7).toInt()
                 runCatching { stream.setVideoBitrateOnFly(target) }
-                _thermalNotice.value = "Phone warming — bitrate dropped to ${target / 1000} kbps"
+                _thermalNotice.value = "Phone warming, bitrate dropped to ${target / 1000} kbps"
             }
             PowerManager.THERMAL_STATUS_SEVERE -> {
                 val target = (configuredBitrate * 0.4).toInt()
                 runCatching { stream.setVideoBitrateOnFly(target) }
-                _thermalNotice.value = "Phone hot — bitrate dropped to ${target / 1000} kbps"
+                _thermalNotice.value = "Phone hot, bitrate dropped to ${target / 1000} kbps"
             }
             PowerManager.THERMAL_STATUS_CRITICAL,
             PowerManager.THERMAL_STATUS_EMERGENCY,
             PowerManager.THERMAL_STATUS_SHUTDOWN -> {
-                _thermalNotice.value = "Phone too hot — stream stopped"
+                _thermalNotice.value = "Phone too hot, stream stopped"
                 stop()
             }
             else -> Unit

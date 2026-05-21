@@ -75,9 +75,8 @@ private val FpsOptions = listOf(30, 60)
 fun SettingsScreen(onClose: () -> Unit) {
     val context = LocalContext.current
 
-    var serverUrl by remember { mutableStateOf(Prefs.serverUrl(context)) }
-    var streamKey by remember { mutableStateOf(Prefs.streamKey(context)) }
-    var keyVisible by remember { mutableStateOf(false) }
+    var streamUrl by remember { mutableStateOf(Prefs.streamUrl(context)) }
+    var streamUrl2 by remember { mutableStateOf(Prefs.streamUrl2(context)) }
     var resolutionIndex by remember {
         mutableIntStateOf(
             Resolutions.indexOfFirst {
@@ -96,9 +95,10 @@ fun SettingsScreen(onClose: () -> Unit) {
     var stealthDot by remember { mutableStateOf(Prefs.stealthDot(context)) }
     var stealthHaptic by remember { mutableStateOf(Prefs.stealthHaptic(context)) }
     var stealthPulseSec by remember { mutableIntStateOf(Prefs.stealthPulseSeconds(context)) }
+    var maxReconnectMin by remember { mutableIntStateOf(Prefs.maxReconnectMinutes(context)) }
 
-    LaunchedEffect(serverUrl) { Prefs.setServerUrl(context, serverUrl) }
-    LaunchedEffect(streamKey) { Prefs.setStreamKey(context, streamKey) }
+    LaunchedEffect(streamUrl) { Prefs.setStreamUrl(context, streamUrl) }
+    LaunchedEffect(streamUrl2) { Prefs.setStreamUrl2(context, streamUrl2) }
     LaunchedEffect(resolutionIndex) {
         val r = Resolutions[resolutionIndex]
         Prefs.setResolution(context, r.width, r.height)
@@ -122,6 +122,7 @@ fun SettingsScreen(onClose: () -> Unit) {
     LaunchedEffect(stealthDot) { Prefs.setStealthDot(context, stealthDot) }
     LaunchedEffect(stealthHaptic) { Prefs.setStealthHaptic(context, stealthHaptic) }
     LaunchedEffect(stealthPulseSec) { Prefs.setStealthPulseSeconds(context, stealthPulseSec) }
+    LaunchedEffect(maxReconnectMin) { Prefs.setMaxReconnectMinutes(context, maxReconnectMin) }
 
     Column(
         modifier = Modifier
@@ -139,58 +140,26 @@ fun SettingsScreen(onClose: () -> Unit) {
                 .padding(top = 8.dp, bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(28.dp),
         ) {
-            Section(title = "Stream destination") {
-                LabeledField(
-                    label = "Server URL",
-                    value = serverUrl,
-                    onValueChange = { serverUrl = it },
-                    placeholder = "rtmps://server.live-video.net/app",
+            Section(title = "Stream destinations") {
+                Text(
+                    text = "Stream to one or two platforms at once. Paste the full RTMP URL " +
+                        "(server URL and stream key combined with a slash). " +
+                        "e.g. rtmp://live.twitch.tv/app/live_xxxxxxxx",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    FieldLabel("Stream key")
-                    OutlinedTextField(
-                        value = streamKey,
-                        onValueChange = { streamKey = it },
-                        placeholder = {
-                            Text(
-                                text = "sk_live_…",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        },
-                        singleLine = true,
-                        visualTransformation = if (keyVisible) {
-                            VisualTransformation.None
-                        } else {
-                            PasswordVisualTransformation()
-                        },
-                        trailingIcon = {
-                            IconButton(onClick = { keyVisible = !keyVisible }) {
-                                Icon(
-                                    imageVector = if (keyVisible) {
-                                        Icons.Filled.VisibilityOff
-                                    } else {
-                                        Icons.Filled.Visibility
-                                    },
-                                    contentDescription = if (keyVisible) {
-                                        "Hide stream key"
-                                    } else {
-                                        "Show stream key"
-                                    },
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        },
-                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = MaterialTheme.colorScheme.onBackground,
-                            unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                        ),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
+                Spacer(modifier = Modifier.height(4.dp))
+                DestinationBlock(
+                    heading = "Destination 1",
+                    streamUrl = streamUrl,
+                    onStreamUrlChange = { streamUrl = it },
+                )
+                Spacer(modifier = Modifier.height(20.dp))
+                DestinationBlock(
+                    heading = "Destination 2 (optional)",
+                    streamUrl = streamUrl2,
+                    onStreamUrlChange = { streamUrl2 = it },
+                )
             }
             Section(title = "Quality") {
                 FieldLabel("Resolution")
@@ -213,6 +182,26 @@ fun SettingsScreen(onClose: () -> Unit) {
                     onValueChange = { bitrateText = it.filter(Char::isDigit) },
                     placeholder = "2500",
                     keyboardType = KeyboardType.Number,
+                )
+            }
+            Section(title = "Auto-reconnect") {
+                Text(
+                    text = "If your stream drops mid-broadcast, Roam will keep trying " +
+                        "to reconnect for this long before giving up.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                FieldLabel("Keep trying for")
+                ChipRow(
+                    options = listOf(
+                        1 to "1 min",
+                        5 to "5 min",
+                        15 to "15 min",
+                        0 to "Forever",
+                    ),
+                    selected = maxReconnectMin,
+                    onSelect = { maxReconnectMin = it },
                 )
             }
             Section(title = "Chat panel") {
@@ -267,7 +256,7 @@ fun SettingsScreen(onClose: () -> Unit) {
             }
             Section(title = "Stealth mode") {
                 Text(
-                    text = "Black screen while the stream keeps running — for discretion in public. Long-press anywhere to exit.",
+                    text = "Black screen while the stream keeps running, for discretion in public. Long-press anywhere to exit.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
                 )
@@ -318,7 +307,7 @@ fun SettingsScreen(onClose: () -> Unit) {
                     Column(modifier = Modifier.weight(1f)) {
                         FieldLabel("Support Roam Live")
                         Text(
-                            text = "Free + donation-supported. Opens roamlive.app/support.",
+                            text = "Donations help me keep building this.",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontSize = 12.sp,
                         )
@@ -447,6 +436,68 @@ private fun LabeledField(
             ),
             modifier = Modifier.fillMaxWidth(),
         )
+    }
+}
+
+@Composable
+private fun DestinationBlock(
+    heading: String,
+    streamUrl: String,
+    onStreamUrlChange: (String) -> Unit,
+) {
+    var urlVisible by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            text = heading,
+            color = MaterialTheme.colorScheme.onBackground,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.4.sp,
+        )
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            FieldLabel("Stream URL")
+            OutlinedTextField(
+                value = streamUrl,
+                onValueChange = onStreamUrlChange,
+                placeholder = {
+                    Text(
+                        text = "rtmp://server/app/key",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+                singleLine = true,
+                visualTransformation = if (urlVisible) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
+                trailingIcon = {
+                    IconButton(onClick = { urlVisible = !urlVisible }) {
+                        Icon(
+                            imageVector = if (urlVisible) {
+                                Icons.Filled.VisibilityOff
+                            } else {
+                                Icons.Filled.Visibility
+                            },
+                            contentDescription = if (urlVisible) {
+                                "Hide stream URL"
+                            } else {
+                                "Show stream URL"
+                            },
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
+                shape = RoundedCornerShape(12.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                    unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                    unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
     }
 }
 

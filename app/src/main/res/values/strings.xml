@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Roam</string>
-    <string name="permission_camera_rationale">Roam needs camera access to stream.</string>
-    <string name="permission_microphone_rationale">Roam needs microphone access to capture audio for the stream.</string>
+    <string name="app_name">Roam Live</string>
+    <string name="permission_camera_rationale">Roam Live needs camera access to stream.</string>
+    <string name="permission_microphone_rationale">Roam Live needs microphone access to capture audio for the stream.</string>
     <string name="permission_grant">Grant permissions</string>
     <string name="permission_open_settings">Open settings</string>
 </resources>

@@ -31,8 +31,8 @@ android {
         applicationId = "dev.whitespc.roam"
         minSdk = 29
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.1.3"
+        versionCode = 6
+        versionName = "0.1.6"
     }
 
     signingConfigs {
