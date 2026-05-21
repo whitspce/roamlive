@@ -41,9 +41,12 @@ sealed interface OverlaySource {
         val colorArgb: Int = -0x1,  // white
     ) : OverlaySource
 
-    /** Local file path to a previously-imported image (app-private storage). */
+    /** A user-imported image. [path] is in app-private storage; [aspectRatio] is
+     *  the source image's width/height, kept so the overlay's height can be
+     *  derived from its width without re-decoding the file. */
     data class Image(
         val path: String,
+        val aspectRatio: Float = 1f,
     ) : OverlaySource
 
     /** The Roam Live watermark. Renderer loads the bundled drawable; no user-

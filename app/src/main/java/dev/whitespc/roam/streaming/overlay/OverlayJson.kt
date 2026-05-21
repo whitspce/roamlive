@@ -75,6 +75,7 @@ object OverlayJson {
         is OverlaySource.Image -> JSONObject().apply {
             put("type", "image")
             put("path", source.path)
+            put("aspectRatio", source.aspectRatio.toDouble())
         }
         OverlaySource.Watermark -> JSONObject().apply {
             put("type", "watermark")
@@ -90,6 +91,7 @@ object OverlayJson {
             )
             "image" -> OverlaySource.Image(
                 path = obj.getString("path"),
+                aspectRatio = obj.optDouble("aspectRatio", 1.0).toFloat(),
             )
             "watermark" -> OverlaySource.Watermark
             else -> null

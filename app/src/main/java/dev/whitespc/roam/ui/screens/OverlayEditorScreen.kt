@@ -1,5 +1,9 @@
 package dev.whitespc.roam.ui.screens
 
+import android.graphics.BitmapFactory
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,13 +24,16 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.Icon
@@ -34,17 +41,21 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -53,16 +64,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.whitespc.roam.R
 import dev.whitespc.roam.storage.Prefs
+import dev.whitespc.roam.streaming.overlay.OverlayImageStore
 import dev.whitespc.roam.streaming.overlay.OverlayItem
 import dev.whitespc.roam.streaming.overlay.OverlaySource
 import dev.whitespc.roam.streaming.overlay.Scene
 import dev.whitespc.roam.ui.theme.RoamLive
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.UUID
 
 // The nine anchor presets, as (label, xPercent, yPercent) centre coordinates.
-// These map cleanly through OverlayRenderer.positionToTranslate to the matching
-// TranslateTo anchor, and the editor canvas renders an item centred at the same
-// coordinates — so editor and broadcast agree.
 private val ANCHORS = listOf(
     Triple("TL", 15f, 12f), Triple("T", 50f, 12f), Triple("TR", 85f, 12f),
     Triple("L", 15f, 50f), Triple("C", 50f, 50f), Triple("R", 85f, 50f),
@@ -71,15 +83,52 @@ private val ANCHORS = listOf(
 
 private val CANVAS_NAVY = Color(0xFF13243F)
 
+// Preset text colours (ARGB). A full colour picker is overkill for v1.
+private val TEXT_COLOURS = listOf(
+    0xFFFFFFFF, 0xFF000000, 0xFFFF2D2D, 0xFFFFD23A,
+    0xFF53FC18, 0xFF3AC8FF, 0xFFFF7A3A, 0xFFB46BFF,
+).map { it.toInt() }
+
+private const val TEXT_SIZE_MIN = 12f
+private const val TEXT_SIZE_MAX = 72f
+private const val IMAGE_SIZE_MIN = 5f
+private const val IMAGE_SIZE_MAX = 80f
+
 @Composable
 fun OverlayEditorScreen(onClose: () -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
-    // Edits happen on a draft; Save commits, back/Cancel discards.
     var draft by remember { mutableStateOf(Prefs.overlayScene(context)) }
     var selectedId by remember { mutableStateOf<String?>(null) }
-
     val selected = draft.items.firstOrNull { it.id == selectedId }
+
+    val frameAspect = remember {
+        Prefs.videoWidth(context).toFloat() / Prefs.videoHeight(context).coerceAtLeast(1)
+    }
+
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val path = withContext(Dispatchers.IO) { OverlayImageStore.importImage(context, uri) }
+                ?: return@launch
+            val aspect = withContext(Dispatchers.IO) { OverlayImageStore.aspectRatio(path) }
+            val width = 25f
+            val item = OverlayItem(
+                id = UUID.randomUUID().toString(),
+                source = OverlaySource.Image(path, aspect),
+                xPercent = 50f,
+                yPercent = 50f,
+                widthPercent = width,
+                heightPercent = OverlayImageStore.imageHeightPercent(width, aspect, frameAspect),
+                zOrder = nextZOrder(draft),
+            )
+            draft = draft.copy(items = draft.items + item)
+            selectedId = item.id
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -94,7 +143,6 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
                 onClose()
             },
         )
-        // Landscape layout: canvas fills the left, controls panel scrolls on the right.
         Row(modifier = Modifier.fillMaxSize()) {
             Box(
                 modifier = Modifier
@@ -133,12 +181,21 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
                         draft = draft.copy(items = draft.items + item)
                         selectedId = item.id
                     },
+                    onAddImage = {
+                        imagePicker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                        )
+                    },
                 )
                 if (selected != null && !selected.locked) {
                     SelectedItemControls(
                         item = selected,
+                        frameAspect = frameAspect,
                         onChange = { updated -> draft = draft.mapItem(updated.id) { updated } },
                         onDelete = {
+                            (selected.source as? OverlaySource.Image)?.let {
+                                OverlayImageStore.deleteImage(it.path)
+                            }
                             draft = draft.copy(items = draft.items.filter { it.id != selected.id })
                             selectedId = null
                         },
@@ -155,12 +212,9 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
     }
 }
 
-/** Updates the item with [id] via [transform], returning a new Scene. */
 private fun Scene.mapItem(id: String, transform: (OverlayItem) -> OverlayItem): Scene =
     copy(items = items.map { if (it.id == id) transform(it) else it })
 
-/** One above the current max zOrder, so a new overlay lands on top (but watermark
- *  stays above everything at zOrder 1000). */
 private fun nextZOrder(scene: Scene): Int {
     val nonWatermarkMax = scene.items
         .filter { it.source != OverlaySource.Watermark }
@@ -207,11 +261,6 @@ private fun EditorTopBar(onCancel: () -> Unit, onSave: () -> Unit) {
     }
 }
 
-/**
- * A 16:9 dark canvas showing where each visible overlay sits. Sizes itself to the
- * largest 16:9 rectangle that fits its container — so in landscape it fills the
- * height and leaves room for the controls panel beside it.
- */
 @Composable
 private fun EditorCanvas(scene: Scene, selectedId: String?) {
     BoxWithConstraints(
@@ -234,16 +283,12 @@ private fun EditorCanvas(scene: Scene, selectedId: String?) {
                 .clip(RoundedCornerShape(8.dp))
                 .background(CANVAS_NAVY)
                 .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
-                // Small inset so corner overlays don't jam into the rounded border.
-                // Editor-cosmetic only — does not affect the broadcast.
                 .padding(6.dp),
         ) {
             scene.items
                 .filter { it.visible }
                 .sortedBy { it.zOrder }
                 .forEach { item ->
-                    // Align the same 9 ways the renderer's TranslateTo does, so what
-                    // the editor shows matches what gets broadcast.
                     Box(
                         modifier = Modifier
                             .align(positionToAlignment(item.xPercent, item.yPercent))
@@ -256,18 +301,15 @@ private fun EditorCanvas(scene: Scene, selectedId: String?) {
                             )
                             .padding(2.dp),
                     ) {
-                        CanvasItem(item)
+                        CanvasItem(item, canvasWidth, canvasHeight)
                     }
                 }
         }
     }
 }
 
-/**
- * Maps a centre-coord percent position to the matching Compose [Alignment] — the
- * 3x3 grid that mirrors RootEncoder's TranslateTo. Keep this in lockstep with
- * OverlayRenderer.positionToTranslate so the editor preview matches the broadcast.
- */
+/** Maps a centre-coord percent position to the Compose Alignment that mirrors
+ *  RootEncoder's TranslateTo grid — keep in lockstep with the renderer. */
 private fun positionToAlignment(x: Float, y: Float): Alignment {
     val col = when {
         x < 33f -> 0
@@ -294,31 +336,45 @@ private fun positionToAlignment(x: Float, y: Float): Alignment {
 }
 
 @Composable
-private fun CanvasItem(item: OverlayItem) {
+private fun CanvasItem(item: OverlayItem, canvasWidth: Dp, canvasHeight: Dp) {
     when (val s = item.source) {
-        is OverlaySource.Text -> Text(
-            text = s.text.ifBlank { "(empty)" },
-            color = Color(s.colorArgb),
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-        OverlaySource.Watermark -> CanvasWatermark()
-        is OverlaySource.Image -> Text(
-            text = "[image]",
-            color = Color.White,
-            fontSize = 10.sp,
-        )
+        is OverlaySource.Text -> {
+            // Scale the editor's text to the canvas the same way the broadcast
+            // scales it to a 720-tall frame, so the preview is proportionate.
+            val previewSp = (s.fontSizeSp * (canvasHeight.value / 720f)).coerceAtLeast(6f)
+            Text(
+                text = s.text.ifBlank { "(empty)" },
+                color = Color(s.colorArgb),
+                fontSize = previewSp.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        OverlaySource.Watermark -> CanvasWatermark(canvasWidth, item.widthPercent)
+        is OverlaySource.Image -> CanvasImage(s.path, canvasWidth, item.widthPercent)
     }
 }
 
 @Composable
-private fun CanvasWatermark() {
-    // Only the watermark uses a bundled drawable in this chunk; user images come later.
+private fun CanvasWatermark(canvasWidth: Dp, widthPercent: Float) {
     androidx.compose.foundation.Image(
         painter = painterResource(R.drawable.watermark),
         contentDescription = null,
-        modifier = Modifier.width(64.dp),
+        modifier = Modifier.width(canvasWidth * (widthPercent / 100f)),
     )
+}
+
+@Composable
+private fun CanvasImage(path: String, canvasWidth: Dp, widthPercent: Float) {
+    val bitmap = remember(path) { BitmapFactory.decodeFile(path)?.asImageBitmap() }
+    if (bitmap != null) {
+        androidx.compose.foundation.Image(
+            bitmap = bitmap,
+            contentDescription = null,
+            modifier = Modifier.width(canvasWidth * (widthPercent / 100f)),
+        )
+    } else {
+        Text(text = "[image missing]", color = Color.White, fontSize = 10.sp)
+    }
 }
 
 @Composable
@@ -328,6 +384,7 @@ private fun OverlayList(
     onSelect: (String) -> Unit,
     onToggleVisible: (String) -> Unit,
     onAddText: () -> Unit,
+    onAddImage: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         SectionLabel("Overlays")
@@ -349,8 +406,6 @@ private fun OverlayList(
             ) {
                 Checkbox(
                     checked = item.visible,
-                    // Locked items (the watermark) can't be hidden — the checkbox
-                    // is shown but disabled so it's always-on and non-interactive.
                     onCheckedChange = if (item.locked) null else { _ -> onToggleVisible(item.id) },
                     enabled = !item.locked,
                     colors = CheckboxDefaults.colors(checkedColor = RoamLive),
@@ -372,35 +427,59 @@ private fun OverlayList(
             }
         }
         Spacer(modifier = Modifier.height(8.dp))
-        Surface(
-            onClick = onAddText,
-            shape = RoundedCornerShape(8.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            modifier = Modifier.fillMaxWidth(),
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AddButton(
+                label = "Text",
+                icon = Icons.Filled.TextFields,
+                onClick = onAddText,
+                modifier = Modifier.weight(1f),
+            )
+            AddButton(
+                label = "Image",
+                icon = Icons.Filled.Image,
+                onClick = onAddImage,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun AddButton(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = modifier,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+            modifier = Modifier.padding(vertical = 10.dp),
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(vertical = 10.dp, horizontal = 12.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Add,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onBackground,
-                    modifier = Modifier.size(18.dp),
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Add text overlay",
-                    color = MaterialTheme.colorScheme.onBackground,
-                    fontSize = 14.sp,
-                )
-            }
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onBackground,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = label,
+                color = MaterialTheme.colorScheme.onBackground,
+                fontSize = 14.sp,
+            )
         }
     }
 }
 
 private fun overlayLabel(item: OverlayItem): String = when (val s = item.source) {
-    is OverlaySource.Text -> "Text: ${s.text.take(20).ifBlank { "(empty)" }}"
+    is OverlaySource.Text -> "Text: ${s.text.take(18).ifBlank { "(empty)" }}"
     is OverlaySource.Image -> "Image"
     OverlaySource.Watermark -> "Watermark"
 }
@@ -408,29 +487,60 @@ private fun overlayLabel(item: OverlayItem): String = when (val s = item.source)
 @Composable
 private fun SelectedItemControls(
     item: OverlayItem,
+    frameAspect: Float,
     onChange: (OverlayItem) -> Unit,
     onDelete: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SectionLabel("Selected overlay")
 
-        if (item.source is OverlaySource.Text) {
-            OutlinedTextField(
-                value = item.source.text,
-                onValueChange = { onChange(item.copy(source = item.source.copy(text = it))) },
-                placeholder = {
-                    Text("Overlay text", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                },
-                singleLine = true,
-                shape = RoundedCornerShape(12.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = MaterialTheme.colorScheme.onBackground,
-                    unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            )
+        when (val s = item.source) {
+            is OverlaySource.Text -> {
+                OutlinedTextField(
+                    value = s.text,
+                    onValueChange = { onChange(item.copy(source = s.copy(text = it))) },
+                    placeholder = {
+                        Text("Overlay text", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                        unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                LabeledSlider(
+                    label = "Text size",
+                    value = s.fontSizeSp,
+                    range = TEXT_SIZE_MIN..TEXT_SIZE_MAX,
+                    onChange = { onChange(item.copy(source = s.copy(fontSizeSp = it))) },
+                )
+                ColourPicker(
+                    selected = s.colorArgb,
+                    onPick = { onChange(item.copy(source = s.copy(colorArgb = it))) },
+                )
+            }
+            is OverlaySource.Image -> {
+                LabeledSlider(
+                    label = "Size",
+                    value = item.widthPercent,
+                    range = IMAGE_SIZE_MIN..IMAGE_SIZE_MAX,
+                    onChange = { newWidth ->
+                        onChange(
+                            item.copy(
+                                widthPercent = newWidth,
+                                heightPercent = OverlayImageStore.imageHeightPercent(
+                                    newWidth, s.aspectRatio, frameAspect,
+                                ),
+                            ),
+                        )
+                    },
+                )
+            }
+            OverlaySource.Watermark -> Unit
         }
 
         Text(
@@ -468,7 +578,60 @@ private fun SelectedItemControls(
     }
 }
 
-/** 3x3 grid of anchor buttons. Picking one snaps the item to that position. */
+@Composable
+private fun LabeledSlider(
+    label: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    onChange: (Float) -> Unit,
+) {
+    Column {
+        Text(
+            text = "$label: ${value.toInt()}",
+            color = MaterialTheme.colorScheme.onBackground,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        Slider(
+            value = value,
+            onValueChange = onChange,
+            valueRange = range,
+            colors = SliderDefaults.colors(
+                thumbColor = RoamLive,
+                activeTrackColor = RoamLive,
+            ),
+        )
+    }
+}
+
+@Composable
+private fun ColourPicker(selected: Int, onPick: (Int) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = "Colour",
+            color = MaterialTheme.colorScheme.onBackground,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TEXT_COLOURS.forEach { argb ->
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(Color(argb))
+                        .border(
+                            width = if (argb == selected) 2.5.dp else 1.dp,
+                            color = if (argb == selected) RoamLive else MaterialTheme.colorScheme.outline,
+                            shape = CircleShape,
+                        )
+                        .clickable { onPick(argb) },
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun AnchorGrid(
     current: Pair<Float, Float>,
