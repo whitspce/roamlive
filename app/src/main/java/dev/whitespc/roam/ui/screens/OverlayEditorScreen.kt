@@ -32,6 +32,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.Checkbox
@@ -90,7 +92,7 @@ private val TEXT_COLOURS = listOf(
 ).map { it.toInt() }
 
 private const val TEXT_SIZE_MIN = 12f
-private const val TEXT_SIZE_MAX = 72f
+private const val TEXT_SIZE_MAX = 144f
 private const val IMAGE_SIZE_MIN = 5f
 private const val IMAGE_SIZE_MAX = 80f
 
@@ -168,6 +170,7 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
                     onToggleVisible = { id ->
                         draft = draft.mapItem(id) { it.copy(visible = !it.visible) }
                     },
+                    onMove = { id, up -> draft = draft.moveItem(id, up) },
                     onAddText = {
                         val item = OverlayItem(
                             id = UUID.randomUUID().toString(),
@@ -220,6 +223,33 @@ private fun nextZOrder(scene: Scene): Int {
         .filter { it.source != OverlaySource.Watermark }
         .maxOfOrNull { it.zOrder } ?: 0
     return (nonWatermarkMax + 1).coerceAtMost(999)
+}
+
+/**
+ * Swap an item's z-order with its neighbour, moving it [up] (toward the top
+ * layer) or down. Only non-watermark items reorder — the watermark stays
+ * pinned above everything. Returns the scene unchanged if the move isn't valid.
+ */
+private fun Scene.moveItem(id: String, up: Boolean): Scene {
+    // List is shown top-layer-first, so "up" means a higher zOrder.
+    val ordered = items
+        .filter { it.source != OverlaySource.Watermark }
+        .sortedByDescending { it.zOrder }
+    val idx = ordered.indexOfFirst { it.id == id }
+    if (idx < 0) return this
+    val swapIdx = if (up) idx - 1 else idx + 1
+    if (swapIdx !in ordered.indices) return this
+    val a = ordered[idx]
+    val b = ordered[swapIdx]
+    return copy(
+        items = items.map {
+            when (it.id) {
+                a.id -> it.copy(zOrder = b.zOrder)
+                b.id -> it.copy(zOrder = a.zOrder)
+                else -> it
+            }
+        },
+    )
 }
 
 @Composable
@@ -383,12 +413,17 @@ private fun OverlayList(
     selectedId: String?,
     onSelect: (String) -> Unit,
     onToggleVisible: (String) -> Unit,
+    onMove: (String, Boolean) -> Unit,
     onAddText: () -> Unit,
     onAddImage: () -> Unit,
 ) {
+    val rows = scene.items.sortedByDescending { it.zOrder }
+    // Reorderable subset, in the same top-first order as the visible list.
+    val reorderable = rows.filter { it.source != OverlaySource.Watermark }
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         SectionLabel("Overlays")
-        scene.items.sortedByDescending { it.zOrder }.forEach { item ->
+        rows.forEach { item ->
+            val reorderIdx = reorderable.indexOfFirst { it.id == item.id }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
@@ -414,6 +449,8 @@ private fun OverlayList(
                     text = overlayLabel(item),
                     color = MaterialTheme.colorScheme.onBackground,
                     fontSize = 14.sp,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
                 if (item.locked) {
@@ -422,6 +459,19 @@ private fun OverlayList(
                         contentDescription = "Locked",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(16.dp),
+                    )
+                } else {
+                    ReorderArrow(
+                        icon = Icons.Filled.KeyboardArrowUp,
+                        description = "Move up a layer",
+                        enabled = reorderIdx > 0,
+                        onClick = { onMove(item.id, true) },
+                    )
+                    ReorderArrow(
+                        icon = Icons.Filled.KeyboardArrowDown,
+                        description = "Move down a layer",
+                        enabled = reorderIdx < reorderable.lastIndex,
+                        onClick = { onMove(item.id, false) },
                     )
                 }
             }
@@ -441,6 +491,31 @@ private fun OverlayList(
                 modifier = Modifier.weight(1f),
             )
         }
+    }
+}
+
+@Composable
+private fun ReorderArrow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    description: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.size(32.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = description,
+            tint = if (enabled) {
+                MaterialTheme.colorScheme.onBackground
+            } else {
+                MaterialTheme.colorScheme.outline
+            },
+            modifier = Modifier.size(20.dp),
+        )
     }
 }
 
@@ -478,10 +553,13 @@ private fun AddButton(
     }
 }
 
-private fun overlayLabel(item: OverlayItem): String = when (val s = item.source) {
-    is OverlaySource.Text -> "Text: ${s.text.take(18).ifBlank { "(empty)" }}"
-    is OverlaySource.Image -> "Image"
-    OverlaySource.Watermark -> "Watermark"
+private fun overlayLabel(item: OverlayItem): String {
+    if (item.name.isNotBlank()) return item.name
+    return when (val s = item.source) {
+        is OverlaySource.Text -> "Text: ${s.text.take(18).ifBlank { "(empty)" }}"
+        is OverlaySource.Image -> "Image"
+        OverlaySource.Watermark -> "Watermark"
+    }
 }
 
 @Composable
@@ -494,11 +572,30 @@ private fun SelectedItemControls(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SectionLabel("Selected overlay")
 
+        OutlinedTextField(
+            value = item.name,
+            onValueChange = { onChange(item.copy(name = it)) },
+            label = { Text("Name") },
+            placeholder = {
+                Text("Name (optional)", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            },
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
+
         when (val s = item.source) {
             is OverlaySource.Text -> {
                 OutlinedTextField(
                     value = s.text,
                     onValueChange = { onChange(item.copy(source = s.copy(text = it))) },
+                    label = { Text("Text") },
                     placeholder = {
                         Text("Overlay text", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     },

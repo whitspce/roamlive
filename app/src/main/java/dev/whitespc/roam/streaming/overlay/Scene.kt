@@ -20,6 +20,9 @@ data class Scene(
 data class OverlayItem(
     val id: String,
     val source: OverlaySource,
+    /** User-given name shown in the editor list. Blank falls back to a label
+     *  derived from the source type. */
+    val name: String = "",
     val xPercent: Float = 50f,
     val yPercent: Float = 50f,
     val widthPercent: Float = 30f,

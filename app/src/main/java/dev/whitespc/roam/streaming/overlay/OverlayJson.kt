@@ -42,6 +42,7 @@ object OverlayJson {
     private fun itemToJson(item: OverlayItem): JSONObject = JSONObject().apply {
         put("id", item.id)
         put("source", sourceToJson(item.source))
+        put("name", item.name)
         put("x", item.xPercent.toDouble())
         put("y", item.yPercent.toDouble())
         put("w", item.widthPercent.toDouble())
@@ -55,6 +56,7 @@ object OverlayJson {
         OverlayItem(
             id = obj.getString("id"),
             source = sourceFromJson(obj.getJSONObject("source")) ?: return null,
+            name = obj.optString("name", ""),
             xPercent = obj.optDouble("x", 50.0).toFloat(),
             yPercent = obj.optDouble("y", 50.0).toFloat(),
             widthPercent = obj.optDouble("w", 30.0).toFloat(),
