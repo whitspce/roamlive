@@ -5,11 +5,12 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -41,13 +42,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.whitespc.roam.R
@@ -59,14 +60,16 @@ import dev.whitespc.roam.ui.theme.RoamLive
 import java.util.UUID
 
 // The nine anchor presets, as (label, xPercent, yPercent) centre coordinates.
-// These values map cleanly through OverlayRenderer.positionToTranslate to the
-// matching TranslateTo anchor, and the editor canvas can render an item centred
-// at the same coordinates — so editor and broadcast agree.
+// These map cleanly through OverlayRenderer.positionToTranslate to the matching
+// TranslateTo anchor, and the editor canvas renders an item centred at the same
+// coordinates — so editor and broadcast agree.
 private val ANCHORS = listOf(
     Triple("TL", 15f, 12f), Triple("T", 50f, 12f), Triple("TR", 85f, 12f),
     Triple("L", 15f, 50f), Triple("C", 50f, 50f), Triple("R", 85f, 50f),
     Triple("BL", 15f, 88f), Triple("B", 50f, 88f), Triple("BR", 85f, 88f),
 )
+
+private val CANVAS_NAVY = Color(0xFF13243F)
 
 @Composable
 fun OverlayEditorScreen(onClose: () -> Unit) {
@@ -91,53 +94,62 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
                 onClose()
             },
         )
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 32.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp),
-        ) {
-            EditorCanvas(scene = draft, selectedId = selectedId)
-
-            OverlayList(
-                scene = draft,
-                selectedId = selectedId,
-                onSelect = { selectedId = it },
-                onToggleVisible = { id ->
-                    draft = draft.mapItem(id) { it.copy(visible = !it.visible) }
-                },
-                onAddText = {
-                    val item = OverlayItem(
-                        id = UUID.randomUUID().toString(),
-                        source = OverlaySource.Text("New text"),
-                        xPercent = 50f,
-                        yPercent = 50f,
-                        widthPercent = 40f,
-                        heightPercent = 12f,
-                        zOrder = nextZOrder(draft),
-                    )
-                    draft = draft.copy(items = draft.items + item)
-                    selectedId = item.id
-                },
-            )
-
-            if (selected != null && !selected.locked) {
-                SelectedItemControls(
-                    item = selected,
-                    onChange = { updated -> draft = draft.mapItem(updated.id) { updated } },
-                    onDelete = {
-                        draft = draft.copy(items = draft.items.filter { it.id != selected.id })
-                        selectedId = null
+        // Landscape layout: canvas fills the left, controls panel scrolls on the right.
+        Row(modifier = Modifier.fillMaxSize()) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .padding(start = 20.dp, end = 12.dp, top = 4.dp, bottom = 20.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                EditorCanvas(scene = draft, selectedId = selectedId)
+            }
+            Column(
+                modifier = Modifier
+                    .width(300.dp)
+                    .fillMaxHeight()
+                    .verticalScroll(rememberScrollState())
+                    .padding(end = 20.dp, top = 4.dp, bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                OverlayList(
+                    scene = draft,
+                    selectedId = selectedId,
+                    onSelect = { selectedId = it },
+                    onToggleVisible = { id ->
+                        draft = draft.mapItem(id) { it.copy(visible = !it.visible) }
+                    },
+                    onAddText = {
+                        val item = OverlayItem(
+                            id = UUID.randomUUID().toString(),
+                            source = OverlaySource.Text("New text"),
+                            xPercent = 50f,
+                            yPercent = 50f,
+                            widthPercent = 40f,
+                            heightPercent = 12f,
+                            zOrder = nextZOrder(draft),
+                        )
+                        draft = draft.copy(items = draft.items + item)
+                        selectedId = item.id
                     },
                 )
-            } else if (selected != null && selected.locked) {
-                Text(
-                    text = "The watermark is locked and can't be edited.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 13.sp,
-                )
+                if (selected != null && !selected.locked) {
+                    SelectedItemControls(
+                        item = selected,
+                        onChange = { updated -> draft = draft.mapItem(updated.id) { updated } },
+                        onDelete = {
+                            draft = draft.copy(items = draft.items.filter { it.id != selected.id })
+                            selectedId = null
+                        },
+                    )
+                } else if (selected != null && selected.locked) {
+                    Text(
+                        text = "The watermark is locked and can't be edited.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp,
+                    )
+                }
             }
         }
     }
@@ -195,41 +207,89 @@ private fun EditorTopBar(onCancel: () -> Unit, onSave: () -> Unit) {
     }
 }
 
-/** A 16:9 dark canvas showing where each visible overlay sits. Approximate — the
- *  real broadcast is rendered by OverlayRenderer — but close enough to position by. */
+/**
+ * A 16:9 dark canvas showing where each visible overlay sits. Sizes itself to the
+ * largest 16:9 rectangle that fits its container — so in landscape it fills the
+ * height and leaves room for the controls panel beside it.
+ */
 @Composable
 private fun EditorCanvas(scene: Scene, selectedId: String?) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .aspectRatio(16f / 9f)
-            .clip(RoundedCornerShape(8.dp))
-            // Dark navy so the canvas (the broadcast frame) reads as distinct from
-            // the near-black app background instead of blending into one big box.
-            .background(Color(0xFF13243F))
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp)),
+    BoxWithConstraints(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center,
     ) {
-        scene.items
-            .filter { it.visible }
-            .sortedBy { it.zOrder }
-            .forEach { item ->
-                val hBias = (item.xPercent / 50f) - 1f
-                val vBias = (item.yPercent / 50f) - 1f
-                Box(
-                    modifier = Modifier
-                        .align(BiasAlignment(hBias.coerceIn(-1f, 1f), vBias.coerceIn(-1f, 1f)))
-                        .then(
-                            if (item.id == selectedId) {
-                                Modifier.border(1.5.dp, RoamLive, RoundedCornerShape(3.dp))
-                            } else {
-                                Modifier
-                            },
-                        )
-                        .padding(2.dp),
-                ) {
-                    CanvasItem(item)
+        val containerRatio = maxWidth.value / maxHeight.value
+        val canvasWidth: Dp
+        val canvasHeight: Dp
+        if (containerRatio > 16f / 9f) {
+            canvasHeight = maxHeight
+            canvasWidth = maxHeight * (16f / 9f)
+        } else {
+            canvasWidth = maxWidth
+            canvasHeight = maxWidth * (9f / 16f)
+        }
+        Box(
+            modifier = Modifier
+                .size(canvasWidth, canvasHeight)
+                .clip(RoundedCornerShape(8.dp))
+                .background(CANVAS_NAVY)
+                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+                // Small inset so corner overlays don't jam into the rounded border.
+                // Editor-cosmetic only — does not affect the broadcast.
+                .padding(6.dp),
+        ) {
+            scene.items
+                .filter { it.visible }
+                .sortedBy { it.zOrder }
+                .forEach { item ->
+                    // Align the same 9 ways the renderer's TranslateTo does, so what
+                    // the editor shows matches what gets broadcast.
+                    Box(
+                        modifier = Modifier
+                            .align(positionToAlignment(item.xPercent, item.yPercent))
+                            .then(
+                                if (item.id == selectedId) {
+                                    Modifier.border(1.5.dp, RoamLive, RoundedCornerShape(3.dp))
+                                } else {
+                                    Modifier
+                                },
+                            )
+                            .padding(2.dp),
+                    ) {
+                        CanvasItem(item)
+                    }
                 }
-            }
+        }
+    }
+}
+
+/**
+ * Maps a centre-coord percent position to the matching Compose [Alignment] — the
+ * 3x3 grid that mirrors RootEncoder's TranslateTo. Keep this in lockstep with
+ * OverlayRenderer.positionToTranslate so the editor preview matches the broadcast.
+ */
+private fun positionToAlignment(x: Float, y: Float): Alignment {
+    val col = when {
+        x < 33f -> 0
+        x > 67f -> 2
+        else -> 1
+    }
+    val row = when {
+        y < 33f -> 0
+        y > 67f -> 2
+        else -> 1
+    }
+    return when (row to col) {
+        0 to 0 -> Alignment.TopStart
+        0 to 1 -> Alignment.TopCenter
+        0 to 2 -> Alignment.TopEnd
+        1 to 0 -> Alignment.CenterStart
+        1 to 1 -> Alignment.Center
+        1 to 2 -> Alignment.CenterEnd
+        2 to 0 -> Alignment.BottomStart
+        2 to 1 -> Alignment.BottomCenter
+        2 to 2 -> Alignment.BottomEnd
+        else -> Alignment.Center
     }
 }
 
@@ -257,7 +317,7 @@ private fun CanvasWatermark() {
     androidx.compose.foundation.Image(
         painter = painterResource(R.drawable.watermark),
         contentDescription = null,
-        modifier = Modifier.width(72.dp),
+        modifier = Modifier.width(64.dp),
     )
 }
 

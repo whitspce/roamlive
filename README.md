@@ -1,11 +1,11 @@
 # Roam Live
 
-Android IRL streaming app.
-Built to be able to be good enough to go live straight away from your phone with most of the features you would need.
+IRL streaming app built for Andriod only.
+Easy enough to immediately go live from your phone but feature rich enough to include most of what you would need for IRL streaming.
 
 Features:
-- Chat panel which is just for the streamer so they can read it while streaming. Integration for twitch + kick chats.
-- Stealth mode for discretion in public (Screen goes black but stream continues. Haptic pulses in case you forget you're streaming)
+- Chat panel (Twitch + Kick) just for the streamer so they can read chat while streaming.
+- Stealth mode for discretion in public (Screen goes black but stream continues)
 - BRB screen with customisable text + auto camera and mic mute.
 - Predictive thermal management with auto bitrate degradation before phone throttles
 - No google play services required, no telemetry, no analytics, private and open source by design. The app only ever checks to see if there's a new version available.

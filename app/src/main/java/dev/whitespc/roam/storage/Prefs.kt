@@ -168,10 +168,17 @@ object Prefs {
     }
 
     /** The active overlay scene. Falls back to [defaultScene] (just the locked
-     *  watermark) on first install or if the saved JSON is corrupted. */
+     *  watermark) on first install or if the saved JSON is corrupted.
+     *
+     *  Locked items (the watermark) are force-healed to visible — they're
+     *  mandatory, and this self-corrects any scene saved with the watermark
+     *  hidden before locked items became un-uncheckable. */
     fun overlayScene(context: Context): Scene {
         val json = sp(context).getString(KEY_OVERLAY_SCENE_V1, null) ?: return defaultScene()
-        return OverlayJson.fromJson(json) ?: defaultScene()
+        val scene = OverlayJson.fromJson(json) ?: return defaultScene()
+        return scene.copy(
+            items = scene.items.map { if (it.locked) it.copy(visible = true) else it },
+        )
     }
 
     fun setOverlayScene(context: Context, scene: Scene) {
