@@ -102,6 +102,12 @@ class WebOverlayController(
                 setBackgroundColor(Color.TRANSPARENT)
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
+                // Let overlay pages auto-play audio (TTS, alert sounds) — an
+                // overlay has no user gesture, and a WebView blocks autoplay
+                // without one by default. This plays sound out the phone
+                // speaker. Routing overlay audio into the broadcast is a
+                // separate, permission-gated feature and is not built yet.
+                settings.mediaPlaybackRequiresUserGesture = false
                 // Needed for imported local overlays: load a file:// entry page
                 // and its relative asset references (CSS, JS, images).
                 settings.allowFileAccess = true
