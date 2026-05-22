@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
@@ -97,7 +98,9 @@ private val TEXT_COLOURS = listOf(
 private const val TEXT_SIZE_MIN = 12f
 private const val TEXT_SIZE_MAX = 144f
 private const val IMAGE_SIZE_MIN = 5f
-private const val IMAGE_SIZE_MAX = 80f
+// Past 100% the image bleeds beyond the frame — wanted for full-frame overlay
+// graphics (a Twitch-style frame) and for images that aren't exactly 16:9.
+private const val IMAGE_SIZE_MAX = 150f
 
 @Composable
 fun OverlayEditorScreen(onClose: () -> Unit) {
@@ -209,12 +212,9 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
                         )
                     },
                     onAddWeb = {
-                        // Show the cost notice once, before the first web overlay.
-                        if (Prefs.webOverlayWarningSeen(context)) {
-                            addWebOverlay()
-                        } else {
-                            showWebWarning = true
-                        }
+                        // Show the cost notice on every add for now — keeps the
+                        // battery/heat tradeoff front of mind. One extra tap.
+                        showWebWarning = true
                     },
                 )
                 if (selected != null && !selected.locked) {
@@ -243,7 +243,6 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
         if (showWebWarning) {
             WebOverlayWarningDialog(
                 onConfirm = {
-                    Prefs.setWebOverlayWarningSeen(context)
                     showWebWarning = false
                     addWebOverlay()
                 },
@@ -464,7 +463,10 @@ private fun CanvasImage(path: String, canvasWidth: Dp, widthPercent: Float) {
         androidx.compose.foundation.Image(
             bitmap = bitmap,
             contentDescription = null,
-            modifier = Modifier.width(canvasWidth * (widthPercent / 100f)),
+            // requiredWidth, not width: past 100% the image must overflow the
+            // canvas (the editor frame) and get clipped, mirroring the broadcast.
+            // Plain width() would clamp to the canvas and freeze the preview.
+            modifier = Modifier.requiredWidth(canvasWidth * (widthPercent / 100f)),
         )
     } else {
         Text(text = "[image missing]", color = Color.White, fontSize = 10.sp)
