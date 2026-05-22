@@ -53,6 +53,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -66,7 +67,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -75,10 +78,12 @@ import dev.whitespc.roam.storage.Prefs
 import dev.whitespc.roam.streaming.overlay.OverlayImageStore
 import dev.whitespc.roam.streaming.overlay.OverlayItem
 import dev.whitespc.roam.streaming.overlay.OverlaySource
+import dev.whitespc.roam.streaming.overlay.OverlayTokens
 import dev.whitespc.roam.streaming.overlay.OverlayWebStore
 import dev.whitespc.roam.streaming.overlay.Scene
 import dev.whitespc.roam.ui.theme.RoamLive
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -445,8 +450,19 @@ private fun CanvasItem(item: OverlayItem, canvasWidth: Dp, canvasHeight: Dp) {
             // Scale the editor's text to the canvas the same way the broadcast
             // scales it to a 720-tall frame, so the preview is proportionate.
             val previewSp = (s.fontSizeSp * (canvasHeight.value / 720f)).coerceAtLeast(6f)
+            // Resolve {time}/{date} so the preview shows real values; re-resolve
+            // each second when the text carries a live token.
+            var resolved by remember(s.text) { mutableStateOf(OverlayTokens.resolve(s.text)) }
+            if (OverlayTokens.hasToken(s.text)) {
+                LaunchedEffect(s.text) {
+                    while (true) {
+                        delay(1000)
+                        resolved = OverlayTokens.resolve(s.text)
+                    }
+                }
+            }
             Text(
-                text = s.text.ifBlank { "(empty)" },
+                text = resolved.ifBlank { "(empty)" },
                 color = Color(s.colorArgb),
                 fontSize = previewSp.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -756,9 +772,18 @@ private fun SelectedItemControls(
 
         when (val s = item.source) {
             is OverlaySource.Text -> {
+                // TextFieldValue (not a plain String) so a token can be inserted
+                // at the cursor and the cursor moved after it. Re-keyed on the
+                // item id so switching overlays resets the field.
+                var textField by remember(item.id) {
+                    mutableStateOf(TextFieldValue(s.text, TextRange(s.text.length)))
+                }
                 OutlinedTextField(
-                    value = s.text,
-                    onValueChange = { onChange(item.copy(source = s.copy(text = it))) },
+                    value = textField,
+                    onValueChange = {
+                        textField = it
+                        onChange(item.copy(source = s.copy(text = it.text)))
+                    },
                     label = { Text("Text") },
                     placeholder = {
                         Text("Overlay text", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -772,6 +797,16 @@ private fun SelectedItemControls(
                         unfocusedBorderColor = MaterialTheme.colorScheme.outline,
                     ),
                     modifier = Modifier.fillMaxWidth(),
+                )
+                TokenChips(
+                    onInsert = { token ->
+                        // Insert at the cursor (replacing any selection) and put
+                        // the cursor right after the inserted token.
+                        val sel = textField.selection
+                        val newText = textField.text.replaceRange(sel.min, sel.max, token)
+                        textField = TextFieldValue(newText, TextRange(sel.min + token.length))
+                        onChange(item.copy(source = s.copy(text = newText)))
+                    },
                 )
                 LabeledSlider(
                     label = "Text size",
@@ -902,6 +937,36 @@ private fun LabeledSlider(
                 activeTrackColor = RoamLive,
             ),
         )
+    }
+}
+
+/** Chips that append a live token ({time}/{date}) to the text. The token shows
+ *  as literal text in the field; the canvas and broadcast resolve it live. */
+@Composable
+private fun TokenChips(onInsert: (String) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = "Insert live value",
+            color = MaterialTheme.colorScheme.onBackground,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OverlayTokens.tokens.forEach { (token, label) ->
+                Surface(
+                    onClick = { onInsert(token) },
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                ) {
+                    Text(
+                        text = label,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    )
+                }
+            }
+        }
     }
 }
 
