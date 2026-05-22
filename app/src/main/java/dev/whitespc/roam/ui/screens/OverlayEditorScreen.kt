@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
@@ -74,6 +75,7 @@ import dev.whitespc.roam.storage.Prefs
 import dev.whitespc.roam.streaming.overlay.OverlayImageStore
 import dev.whitespc.roam.streaming.overlay.OverlayItem
 import dev.whitespc.roam.streaming.overlay.OverlaySource
+import dev.whitespc.roam.streaming.overlay.OverlayWebStore
 import dev.whitespc.roam.streaming.overlay.Scene
 import dev.whitespc.roam.ui.theme.RoamLive
 import kotlinx.coroutines.Dispatchers
@@ -137,6 +139,31 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
             )
             draft = draft.copy(items = draft.items + item)
             selectedId = item.id
+        }
+    }
+
+    val webFilePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val id = selectedId ?: return@rememberLauncherForActivityResult
+        val previous =
+            (draft.items.firstOrNull { it.id == id }?.source as? OverlaySource.WebPage)?.url
+        scope.launch {
+            val fileUrl = withContext(Dispatchers.IO) { OverlayWebStore.importLocal(context, uri) }
+                ?: return@launch
+            // Replaced an earlier imported file — remove its folder.
+            if (previous != null && previous.startsWith("file://")) {
+                withContext(Dispatchers.IO) { OverlayWebStore.delete(previous) }
+            }
+            draft = draft.mapItem(id) { current ->
+                val src = current.source
+                if (src is OverlaySource.WebPage) {
+                    current.copy(source = src.copy(url = fileUrl))
+                } else {
+                    current
+                }
+            }
         }
     }
 
@@ -223,9 +250,13 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
                         item = selected,
                         frameAspect = frameAspect,
                         onChange = { updated -> draft = draft.mapItem(updated.id) { updated } },
+                        onImportWebFile = { webFilePicker.launch(arrayOf("*/*")) },
                         onDelete = {
                             (selected.source as? OverlaySource.Image)?.let {
                                 OverlayImageStore.deleteImage(it.path)
+                            }
+                            (selected.source as? OverlaySource.WebPage)?.let {
+                                OverlayWebStore.delete(it.url)
                             }
                             draft = draft.copy(items = draft.items.filter { it.id != selected.id })
                             selectedId = null
@@ -644,14 +675,54 @@ private fun AddButton(
     }
 }
 
+/** Shows an imported local web overlay by filename, with a way back to the URL
+ *  field — the raw `file://` path is never put in front of the user. */
+@Composable
+private fun ImportedFileRow(fileName: String, onUseUrlInstead: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Filled.UploadFile,
+                contentDescription = null,
+                tint = RoamLive,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = fileName.ifBlank { "imported file" },
+                color = MaterialTheme.colorScheme.onBackground,
+                fontSize = 14.sp,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+        }
+        Text(
+            text = "Imported file",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 12.sp,
+        )
+        TextButton(onClick = onUseUrlInstead) {
+            Text(text = "Use a web address instead", fontSize = 13.sp)
+        }
+    }
+}
+
 private fun overlayLabel(item: OverlayItem): String {
     if (item.name.isNotBlank()) return item.name
     return when (val s = item.source) {
         is OverlaySource.Text -> "Text: ${s.text.take(18).ifBlank { "(empty)" }}"
         is OverlaySource.Image -> "Image"
-        is OverlaySource.WebPage -> "Web: ${s.url.ifBlank { "(no URL)" }}"
+        is OverlaySource.WebPage -> webOverlayLabel(s.url)
         OverlaySource.Watermark -> "Watermark"
     }
+}
+
+/** A web overlay's list label: the filename for an imported local file, the
+ *  address for a URL — never the long raw `file://` path. */
+private fun webOverlayLabel(url: String): String = when {
+    url.isBlank() -> "Web: (no URL)"
+    url.startsWith("file://") -> "Web: ${url.substringAfterLast('/')}"
+    else -> "Web: $url"
 }
 
 @Composable
@@ -659,6 +730,7 @@ private fun SelectedItemControls(
     item: OverlayItem,
     frameAspect: Float,
     onChange: (OverlayItem) -> Unit,
+    onImportWebFile: () -> Unit,
     onDelete: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -730,21 +802,34 @@ private fun SelectedItemControls(
                 )
             }
             is OverlaySource.WebPage -> {
-                OutlinedTextField(
-                    value = s.url,
-                    onValueChange = { onChange(item.copy(source = s.copy(url = it))) },
-                    label = { Text("URL") },
-                    placeholder = {
-                        Text("https://...", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    },
-                    singleLine = true,
-                    shape = RoundedCornerShape(12.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = MaterialTheme.colorScheme.onBackground,
-                        unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                        unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                    ),
+                if (s.url.startsWith("file://")) {
+                    ImportedFileRow(
+                        fileName = s.url.substringAfterLast('/'),
+                        onUseUrlInstead = { onChange(item.copy(source = s.copy(url = ""))) },
+                    )
+                } else {
+                    OutlinedTextField(
+                        value = s.url,
+                        onValueChange = { onChange(item.copy(source = s.copy(url = it))) },
+                        label = { Text("URL") },
+                        placeholder = {
+                            Text("https://...", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                            unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                AddButton(
+                    label = "Import HTML or ZIP",
+                    icon = Icons.Filled.UploadFile,
+                    onClick = onImportWebFile,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Text(

@@ -102,6 +102,9 @@ class WebOverlayController(
                 setBackgroundColor(Color.TRANSPARENT)
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
+                // Needed for imported local overlays: load a file:// entry page
+                // and its relative asset references (CSS, JS, images).
+                settings.allowFileAccess = true
                 webViewClient = WebViewClient()
                 layoutParams = ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
