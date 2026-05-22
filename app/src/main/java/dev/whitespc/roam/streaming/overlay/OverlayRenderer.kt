@@ -10,25 +10,29 @@ import com.pedro.encoder.utils.gl.TranslateTo
 import com.pedro.library.generic.GenericStream
 import dev.whitespc.roam.R
 import dev.whitespc.roam.storage.Prefs
+import dev.whitespc.roam.streaming.WebOverlayController
 
 private const val TAG = "RoamOverlayRenderer"
 
 /**
  * Applies a [Scene] to the [GenericStream]'s GL filter chain. Created once per
- * engine, lives until the engine releases. v1 supports text, image, and watermark
- * sources; new source types (HTML widgets, camera PiP) plug in by extending
- * [OverlaySource] and adding a case to [createFilter].
+ * engine, lives until the engine releases. Supports text, image, watermark, and
+ * web-page sources; new source types plug in by extending [OverlaySource].
+ *
+ * Most sources become a single [BaseFilterRender]. Web pages are different —
+ * each is a live WebView with its own lifecycle, so they're delegated to a
+ * [WebOverlayController] and tracked separately from [activeFilters].
  *
  * Position handling: items store centre coords as percentages. The renderer maps
- * those to RootEncoder's [TranslateTo] enum (a 3×3 grid of anchor points) for
- * v1. The Phase B editor will need finer positioning via setPosition(x, y) —
- * that's a future change to this class.
+ * those to RootEncoder's [TranslateTo] enum (a 3×3 grid of anchor points). Web
+ * overlays ignore position — they render full-frame.
  */
 class OverlayRenderer(
     private val context: Context,
     private val stream: GenericStream,
 ) {
     private val activeFilters = LinkedHashMap<String, BaseFilterRender>()
+    private val webOverlays = LinkedHashMap<String, WebOverlayController>()
 
     fun applyScene(scene: Scene) {
         clear()
@@ -36,6 +40,16 @@ class OverlayRenderer(
             .filter { it.visible }
             .sortedBy { it.zOrder }
             .forEach { item ->
+                val source = item.source
+                if (source is OverlaySource.WebPage) {
+                    // Skip blank-URL web overlays — no point spinning up a WebView
+                    // for an overlay the user added but hasn't pointed anywhere yet.
+                    if (source.url.isBlank()) return@forEach
+                    val controller = WebOverlayController(context, stream)
+                    controller.show(source.url)
+                    webOverlays[item.id] = controller
+                    return@forEach
+                }
                 val filter = createFilter(item) ?: return@forEach
                 runCatching {
                     stream.getGlInterface().addFilter(filter)
@@ -50,11 +64,15 @@ class OverlayRenderer(
             runCatching { filter.release() }
         }
         activeFilters.clear()
+        webOverlays.values.forEach { it.hide() }
+        webOverlays.clear()
     }
 
     private fun createFilter(item: OverlayItem): BaseFilterRender? = when (val s = item.source) {
         is OverlaySource.Text -> createTextFilter(item, s)
         is OverlaySource.Image -> createImageFilter(item, s)
+        // Web pages are handled by applyScene before reaching here.
+        is OverlaySource.WebPage -> null
         OverlaySource.Watermark -> createWatermarkFilter(item)
     }
 

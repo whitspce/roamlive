@@ -34,8 +34,10 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.Icon
@@ -47,6 +49,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -103,6 +106,7 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
 
     var draft by remember { mutableStateOf(Prefs.overlayScene(context)) }
     var selectedId by remember { mutableStateOf<String?>(null) }
+    var showWebWarning by remember { mutableStateOf(false) }
     val selected = draft.items.firstOrNull { it.id == selectedId }
 
     val frameAspect = remember {
@@ -130,6 +134,21 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
             draft = draft.copy(items = draft.items + item)
             selectedId = item.id
         }
+    }
+
+    // Adds a blank-URL web overlay (full-frame) and selects it for editing.
+    fun addWebOverlay() {
+        val item = OverlayItem(
+            id = UUID.randomUUID().toString(),
+            source = OverlaySource.WebPage(""),
+            xPercent = 50f,
+            yPercent = 50f,
+            widthPercent = 100f,
+            heightPercent = 100f,
+            zOrder = nextZOrder(draft),
+        )
+        draft = draft.copy(items = draft.items + item)
+        selectedId = item.id
     }
 
     Column(
@@ -189,6 +208,14 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
                         )
                     },
+                    onAddWeb = {
+                        // Show the cost notice once, before the first web overlay.
+                        if (Prefs.webOverlayWarningSeen(context)) {
+                            addWebOverlay()
+                        } else {
+                            showWebWarning = true
+                        }
+                    },
                 )
                 if (selected != null && !selected.locked) {
                     SelectedItemControls(
@@ -211,6 +238,17 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
                     )
                 }
             }
+        }
+
+        if (showWebWarning) {
+            WebOverlayWarningDialog(
+                onConfirm = {
+                    Prefs.setWebOverlayWarningSeen(context)
+                    showWebWarning = false
+                    addWebOverlay()
+                },
+                onDismiss = { showWebWarning = false },
+            )
         }
     }
 }
@@ -381,6 +419,32 @@ private fun CanvasItem(item: OverlayItem, canvasWidth: Dp, canvasHeight: Dp) {
         }
         OverlaySource.Watermark -> CanvasWatermark(canvasWidth, item.widthPercent)
         is OverlaySource.Image -> CanvasImage(s.path, canvasWidth, item.widthPercent)
+        is OverlaySource.WebPage -> CanvasWebPlaceholder(canvasWidth, canvasHeight)
+    }
+}
+
+/** Web overlays render full-frame and the editor can't show the live page, so
+ *  the canvas shows a labelled placeholder filling the frame. */
+@Composable
+private fun CanvasWebPlaceholder(canvasWidth: Dp, canvasHeight: Dp) {
+    Box(
+        modifier = Modifier
+            .size(canvasWidth - 24.dp, canvasHeight - 24.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(RoamLive.copy(alpha = 0.12f))
+            .border(1.5.dp, RoamLive, RoundedCornerShape(6.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Filled.Language,
+                contentDescription = null,
+                tint = RoamLive,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(text = "Web overlay", color = Color.White, fontSize = 11.sp)
+        }
     }
 }
 
@@ -416,6 +480,7 @@ private fun OverlayList(
     onMove: (String, Boolean) -> Unit,
     onAddText: () -> Unit,
     onAddImage: () -> Unit,
+    onAddWeb: () -> Unit,
 ) {
     val rows = scene.items.sortedByDescending { it.zOrder }
     // Reorderable subset, in the same top-first order as the visible list.
@@ -490,6 +555,12 @@ private fun OverlayList(
                 onClick = onAddImage,
                 modifier = Modifier.weight(1f),
             )
+            AddButton(
+                label = "Web",
+                icon = Icons.Filled.Language,
+                onClick = onAddWeb,
+                modifier = Modifier.weight(1f),
+            )
         }
     }
 }
@@ -558,6 +629,7 @@ private fun overlayLabel(item: OverlayItem): String {
     return when (val s = item.source) {
         is OverlaySource.Text -> "Text: ${s.text.take(18).ifBlank { "(empty)" }}"
         is OverlaySource.Image -> "Image"
+        is OverlaySource.WebPage -> "Web: ${s.url.ifBlank { "(no URL)" }}"
         OverlaySource.Watermark -> "Watermark"
     }
 }
@@ -637,19 +709,46 @@ private fun SelectedItemControls(
                     },
                 )
             }
+            is OverlaySource.WebPage -> {
+                OutlinedTextField(
+                    value = s.url,
+                    onValueChange = { onChange(item.copy(source = s.copy(url = it))) },
+                    label = { Text("URL") },
+                    placeholder = {
+                        Text("https://...", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                        unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    text = "Web overlays fill the whole frame and run a live page. " +
+                        "They use more battery than text or image overlays.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+            }
             OverlaySource.Watermark -> Unit
         }
 
-        Text(
-            text = "Position",
-            color = MaterialTheme.colorScheme.onBackground,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-        )
-        AnchorGrid(
-            current = item.xPercent to item.yPercent,
-            onPick = { (x, y) -> onChange(item.copy(xPercent = x, yPercent = y)) },
-        )
+        if (item.source !is OverlaySource.WebPage) {
+            Text(
+                text = "Position",
+                color = MaterialTheme.colorScheme.onBackground,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            AnchorGrid(
+                current = item.xPercent to item.yPercent,
+                onPick = { (x, y) -> onChange(item.copy(xPercent = x, yPercent = y)) },
+            )
+        }
 
         Spacer(modifier = Modifier.height(4.dp))
         Surface(
@@ -768,5 +867,32 @@ private fun SectionLabel(text: String) {
         fontSize = 13.sp,
         fontWeight = FontWeight.Bold,
         letterSpacing = 1.6.sp,
+    )
+}
+
+/** One-time notice shown before the user's first web overlay, so the battery
+ *  and heat cost is an informed choice rather than a surprise. */
+@Composable
+private fun WebOverlayWarningDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Web overlays use more power") },
+        text = {
+            Text(
+                "A web overlay runs a live web page, so it uses more battery and " +
+                    "heats your phone faster than text or image overlays.\n\n" +
+                    "For a logo, frame, or any static graphic, use an Image overlay. " +
+                    "For a title or fixed text, use a Text overlay. Both are far " +
+                    "lighter.\n\n" +
+                    "Add a web overlay only for what those can't do: alerts, chat, " +
+                    "follower goals, or other live web content.",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("Add web overlay") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
     )
 }

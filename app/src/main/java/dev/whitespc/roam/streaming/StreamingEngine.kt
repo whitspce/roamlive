@@ -228,9 +228,10 @@ class StreamingEngine(private val context: Context) {
             }
             isPrepared = true
 
-            // Apply the persistent overlay scene (watermark + any user-added items).
-            // BRB / camera-off / dual-cam PiP stay as separate mode-based filters
-            // managed elsewhere in this class — they're not part of the scene.
+            // Apply the persistent overlay scene (watermark + any user-added items,
+            // including web overlays). BRB / camera-off / dual-cam PiP stay as
+            // separate mode-based filters managed elsewhere in this class — they're
+            // not part of the scene.
             overlayRenderer.applyScene(Prefs.overlayScene(context))
         }
         if (stream.isOnPreview) stream.stopPreview()

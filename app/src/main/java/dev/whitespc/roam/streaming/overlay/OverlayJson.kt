@@ -79,6 +79,10 @@ object OverlayJson {
             put("path", source.path)
             put("aspectRatio", source.aspectRatio.toDouble())
         }
+        is OverlaySource.WebPage -> JSONObject().apply {
+            put("type", "webpage")
+            put("url", source.url)
+        }
         OverlaySource.Watermark -> JSONObject().apply {
             put("type", "watermark")
         }
@@ -94,6 +98,9 @@ object OverlayJson {
             "image" -> OverlaySource.Image(
                 path = obj.getString("path"),
                 aspectRatio = obj.optDouble("aspectRatio", 1.0).toFloat(),
+            )
+            "webpage" -> OverlaySource.WebPage(
+                url = obj.optString("url", ""),
             )
             "watermark" -> OverlaySource.Watermark
             else -> null

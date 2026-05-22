@@ -52,6 +52,15 @@ sealed interface OverlaySource {
         val aspectRatio: Float = 1f,
     ) : OverlaySource
 
+    /** A web page composited into the broadcast — the industry-standard overlay
+     *  format (OBS Browser Source and every overlay service output to it). [url]
+     *  is an http(s) address in v1; local HTML bundles come later. Rendered
+     *  full-frame: the page itself decides where its content sits. Heavier than
+     *  text/image — it runs a live WebView. */
+    data class WebPage(
+        val url: String = "",
+    ) : OverlaySource
+
     /** The Roam Live watermark. Renderer loads the bundled drawable; no user-
      *  configurable content. */
     data object Watermark : OverlaySource

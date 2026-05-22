@@ -145,7 +145,7 @@ class DualCameraController(
 
         pipFacingFront = facingFront
 
-        val filter = SafePipFilter(
+        val filter = SafeSurfaceFilter(
             object : SurfaceFilterRender.SurfaceReadyCallback {
                 override fun surfaceReady(surfaceTexture: SurfaceTexture) {
                     runCatching {

@@ -28,6 +28,7 @@ object Prefs {
     private const val KEY_STEALTH_PULSE_SEC = "stealth_pulse_sec"
     private const val KEY_MAX_RECONNECT_MIN = "max_reconnect_min"
     private const val KEY_OVERLAY_SCENE_V1 = "overlay_scene_v1"
+    private const val KEY_WEB_OVERLAY_WARNING_SEEN = "web_overlay_warning_seen"
 
     private const val DEFAULT_BRB_TEXT = "BE RIGHT BACK"
     private const val DEFAULT_STEALTH_PULSE_SEC = 30
@@ -183,5 +184,14 @@ object Prefs {
 
     fun setOverlayScene(context: Context, scene: Scene) {
         sp(context).edit().putString(KEY_OVERLAY_SCENE_V1, OverlayJson.toJson(scene)).apply()
+    }
+
+    /** Whether the user has seen the one-time "web overlays cost more battery"
+     *  notice. Shown once before the first web overlay is added, then suppressed. */
+    fun webOverlayWarningSeen(context: Context): Boolean =
+        sp(context).getBoolean(KEY_WEB_OVERLAY_WARNING_SEEN, false)
+
+    fun setWebOverlayWarningSeen(context: Context) {
+        sp(context).edit().putBoolean(KEY_WEB_OVERLAY_WARNING_SEEN, true).apply()
     }
 }
