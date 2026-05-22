@@ -19,7 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
@@ -62,6 +62,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -367,6 +368,10 @@ private fun EditorCanvas(scene: Scene, selectedId: String?) {
                                 },
                             )
                             .padding(2.dp),
+                        // An over-100% image is larger than this box; align its
+                        // overflow toward the item's own anchor so it spills the
+                        // same way the broadcast renders it.
+                        contentAlignment = positionToAlignment(item.xPercent, item.yPercent),
                     ) {
                         CanvasItem(item, canvasWidth, canvasHeight)
                     }
@@ -417,7 +422,9 @@ private fun CanvasItem(item: OverlayItem, canvasWidth: Dp, canvasHeight: Dp) {
             )
         }
         OverlaySource.Watermark -> CanvasWatermark(canvasWidth, item.widthPercent)
-        is OverlaySource.Image -> CanvasImage(s.path, canvasWidth, item.widthPercent)
+        is OverlaySource.Image -> CanvasImage(
+            s.path, canvasWidth, canvasHeight, item.widthPercent, item.heightPercent,
+        )
         is OverlaySource.WebPage -> CanvasWebPlaceholder(canvasWidth, canvasHeight)
     }
 }
@@ -457,16 +464,27 @@ private fun CanvasWatermark(canvasWidth: Dp, widthPercent: Float) {
 }
 
 @Composable
-private fun CanvasImage(path: String, canvasWidth: Dp, widthPercent: Float) {
+private fun CanvasImage(
+    path: String,
+    canvasWidth: Dp,
+    canvasHeight: Dp,
+    widthPercent: Float,
+    heightPercent: Float,
+) {
     val bitmap = remember(path) { BitmapFactory.decodeFile(path)?.asImageBitmap() }
     if (bitmap != null) {
         androidx.compose.foundation.Image(
             bitmap = bitmap,
             contentDescription = null,
-            // requiredWidth, not width: past 100% the image must overflow the
-            // canvas (the editor frame) and get clipped, mirroring the broadcast.
-            // Plain width() would clamp to the canvas and freeze the preview.
-            modifier = Modifier.requiredWidth(canvasWidth * (widthPercent / 100f)),
+            contentScale = ContentScale.FillBounds,
+            // requiredSize fixes BOTH dimensions and ignores the canvas
+            // constraints. Sizing only the width let the canvas clamp the
+            // height, and ContentScale then shrank the image back to fit — so
+            // an over-100% image must pin both dimensions to overflow correctly.
+            modifier = Modifier.requiredSize(
+                canvasWidth * (widthPercent / 100f),
+                canvasHeight * (heightPercent / 100f),
+            ),
         )
     } else {
         Text(text = "[image missing]", color = Color.White, fontSize = 10.sp)
