@@ -147,7 +147,10 @@ fun SettingsScreen(
                 Text(
                     text = "Paste your platform's full RTMP URL — server URL and " +
                         "stream key joined with a slash. " +
-                        "e.g. rtmp://live.twitch.tv/app/live_xxxxxxxx",
+                        "e.g. rtmp://live.twitch.tv/app/live_xxxxxxxx\n\n" +
+                        "To stream to several platforms at once, point Roam at a " +
+                        "restreaming service of your choice (such as Restream or " +
+                        "Beamstream).",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
                 )
