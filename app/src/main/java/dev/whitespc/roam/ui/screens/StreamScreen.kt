@@ -284,10 +284,10 @@ private fun StreamSurface(onOpenSettings: () -> Unit) {
 
             LiveButton(
                 state = state,
-                enabled = streamActive || Prefs.streamUrls(context).isNotEmpty(),
+                enabled = streamActive || Prefs.streamUrl(context).isNotBlank(),
                 onGoLive = {
                     StreamingService.start(context)
-                    engine.start(Prefs.streamUrls(context))
+                    engine.start(Prefs.streamUrl(context))
                 },
                 onStop = {
                     engine.stop()

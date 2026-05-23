@@ -46,10 +46,10 @@ private const val AUDIO_BITRATE = 128_000
 private const val AUDIO_SAMPLE_RATE = 44_100
 private const val AUDIO_STEREO = true
 
-// Single-destination for now. Multi-destination via MultiStream was failing to surface
-// any connect-level logs; reverted to GenericStream while we diagnose. Multi can come
-// back later either via per-platform GenericStream instances or by figuring out why
-// MultiStream's RtmpClient.connect was silently no-op'ing.
+// Single-destination by design. Multi-destination is served by third-party fan-out
+// services (Restream, Beamstream) — phone-side multi-stream multiplies upload over
+// one cellular link, which is the bottleneck IRL streaming already fights. If Roam
+// ever ships its own relay server, fan-out happens there, not on the phone.
 class StreamingEngine(private val context: Context) {
     private val _state = MutableStateFlow<StreamState>(StreamState.Idle)
     val state: StateFlow<StreamState> = _state.asStateFlow()
@@ -204,6 +204,7 @@ class StreamingEngine(private val context: Context) {
     }
 
     fun attachPreview(view: OpenGlView, context: android.content.Context) {
+        val firstAttach = !isPrepared
         if (!isPrepared) {
             val width = Prefs.videoWidth(context)
             val height = Prefs.videoHeight(context)
@@ -227,22 +228,24 @@ class StreamingEngine(private val context: Context) {
                 return
             }
             isPrepared = true
-
-            // Apply the persistent overlay scene (watermark + any user-added items,
-            // including web overlays). BRB / camera-off / dual-cam PiP stay as
-            // separate mode-based filters managed elsewhere in this class — they're
-            // not part of the scene.
-            overlayRenderer.applyScene(Prefs.overlayScene(context))
         }
         if (stream.isOnPreview) stream.stopPreview()
         stream.startPreview(view)
+        if (firstAttach) {
+            // Apply the overlay scene AFTER startPreview, so the GL render thread
+            // is live. Adding image filters to a not-yet-started pipeline loses
+            // them on a cold launch — the overlays would be missing until
+            // something forced a re-apply. BRB / camera-off / dual-cam PiP are
+            // separate mode-based filters managed elsewhere; not part of the scene.
+            overlayRenderer.applyScene(Prefs.overlayScene(context))
+        }
     }
 
     fun detachPreview() {
         if (stream.isOnPreview) stream.stopPreview()
     }
 
-    fun start(urls: List<String>) {
+    fun start(url: String) {
         val current = _state.value
         if (current is StreamState.Live ||
             current is StreamState.Connecting ||
@@ -253,13 +256,10 @@ class StreamingEngine(private val context: Context) {
             _state.value = StreamState.Error("Camera not ready")
             return
         }
-        val url = urls.firstOrNull { it.isNotBlank() }?.trim()
-        if (url.isNullOrBlank()) {
+        val cleanUrl = url.trim()
+        if (cleanUrl.isBlank()) {
             _state.value = StreamState.Error("No stream URL configured")
             return
-        }
-        if (urls.count { it.isNotBlank() } > 1) {
-            Log.w(TAG, "multi-destination temporarily disabled, using first URL only")
         }
 
         // Force-stop any lingering stream from a previous aborted attempt.
@@ -268,9 +268,9 @@ class StreamingEngine(private val context: Context) {
         stopRequested = false
         wantStreaming = true
         hasEverConnected = false
-        lastStreamUrl = url
+        lastStreamUrl = cleanUrl
         _state.value = StreamState.Connecting
-        runCatching { stream.startStream(url) }
+        runCatching { stream.startStream(cleanUrl) }
             .onFailure { t ->
                 Log.w(TAG, "startStream threw", t)
                 _state.value = StreamState.Error(t.message ?: "Stream start failed")

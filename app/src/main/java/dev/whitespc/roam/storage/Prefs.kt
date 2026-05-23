@@ -9,12 +9,9 @@ object Prefs {
     private const val FILE = "roam_prefs"
 
     private const val KEY_STREAM_URL = "stream_url"
-    private const val KEY_STREAM_URL_2 = "stream_url_2"
     // Legacy split-field keys, kept for one-time migration into the single URL.
     private const val KEY_SERVER_URL = "server_url"
     private const val KEY_STREAM_KEY = "stream_key"
-    private const val KEY_SERVER_URL_2 = "server_url_2"
-    private const val KEY_STREAM_KEY_2 = "stream_key_2"
     private const val KEY_VIDEO_WIDTH = "video_width"
     private const val KEY_VIDEO_HEIGHT = "video_height"
     private const val KEY_VIDEO_FPS = "video_fps"
@@ -60,27 +57,6 @@ object Prefs {
     fun setStreamUrl(context: Context, url: String) {
         sp(context).edit().putString(KEY_STREAM_URL, url).apply()
     }
-
-    fun streamUrl2(context: Context): String {
-        val direct = sp(context).getString(KEY_STREAM_URL_2, "") ?: ""
-        if (direct.isNotBlank()) return direct
-        val server = (sp(context).getString(KEY_SERVER_URL_2, "") ?: "").trim().trimEnd('/')
-        val key = (sp(context).getString(KEY_STREAM_KEY_2, "") ?: "").trim()
-        if (server.isNotBlank() && key.isNotBlank()) {
-            val combined = "$server/$key"
-            sp(context).edit().putString(KEY_STREAM_URL_2, combined).apply()
-            return combined
-        }
-        return ""
-    }
-
-    fun setStreamUrl2(context: Context, url: String) {
-        sp(context).edit().putString(KEY_STREAM_URL_2, url).apply()
-    }
-
-    /** All configured destination URLs in slot order, blanks dropped. */
-    fun streamUrls(context: Context): List<String> =
-        listOf(streamUrl(context), streamUrl2(context)).filter { it.isNotBlank() }
 
     fun videoWidth(context: Context): Int =
         sp(context).getInt(KEY_VIDEO_WIDTH, DEFAULT_WIDTH)

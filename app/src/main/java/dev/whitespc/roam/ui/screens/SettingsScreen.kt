@@ -81,7 +81,6 @@ fun SettingsScreen(
     val context = LocalContext.current
 
     var streamUrl by remember { mutableStateOf(Prefs.streamUrl(context)) }
-    var streamUrl2 by remember { mutableStateOf(Prefs.streamUrl2(context)) }
     var resolutionIndex by remember {
         mutableIntStateOf(
             Resolutions.indexOfFirst {
@@ -103,7 +102,6 @@ fun SettingsScreen(
     var maxReconnectMin by remember { mutableIntStateOf(Prefs.maxReconnectMinutes(context)) }
 
     LaunchedEffect(streamUrl) { Prefs.setStreamUrl(context, streamUrl) }
-    LaunchedEffect(streamUrl2) { Prefs.setStreamUrl2(context, streamUrl2) }
     LaunchedEffect(resolutionIndex) {
         val r = Resolutions[resolutionIndex]
         Prefs.setResolution(context, r.width, r.height)
@@ -145,25 +143,18 @@ fun SettingsScreen(
                 .padding(top = 8.dp, bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(28.dp),
         ) {
-            Section(title = "Stream destinations") {
+            Section(title = "Stream destination") {
                 Text(
-                    text = "Stream to one or two platforms at once. Paste the full RTMP URL " +
-                        "(server URL and stream key combined with a slash). " +
+                    text = "Paste your platform's full RTMP URL — server URL and " +
+                        "stream key joined with a slash. " +
                         "e.g. rtmp://live.twitch.tv/app/live_xxxxxxxx",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 DestinationBlock(
-                    heading = "Destination 1",
                     streamUrl = streamUrl,
                     onStreamUrlChange = { streamUrl = it },
-                )
-                Spacer(modifier = Modifier.height(20.dp))
-                DestinationBlock(
-                    heading = "Destination 2 (optional)",
-                    streamUrl = streamUrl2,
-                    onStreamUrlChange = { streamUrl2 = it },
                 )
             }
             Section(title = "Quality") {
@@ -477,63 +468,53 @@ private fun LabeledField(
 
 @Composable
 private fun DestinationBlock(
-    heading: String,
     streamUrl: String,
     onStreamUrlChange: (String) -> Unit,
 ) {
     var urlVisible by remember { mutableStateOf(false) }
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(
-            text = heading,
-            color = MaterialTheme.colorScheme.onBackground,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.4.sp,
-        )
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            FieldLabel("Stream URL")
-            OutlinedTextField(
-                value = streamUrl,
-                onValueChange = onStreamUrlChange,
-                placeholder = {
-                    Text(
-                        text = "rtmp://server/app/key",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        FieldLabel("Stream URL")
+        OutlinedTextField(
+            value = streamUrl,
+            onValueChange = onStreamUrlChange,
+            placeholder = {
+                Text(
+                    text = "rtmp://server/app/key",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            },
+            singleLine = true,
+            visualTransformation = if (urlVisible) {
+                VisualTransformation.None
+            } else {
+                PasswordVisualTransformation()
+            },
+            trailingIcon = {
+                IconButton(onClick = { urlVisible = !urlVisible }) {
+                    Icon(
+                        imageVector = if (urlVisible) {
+                            Icons.Filled.VisibilityOff
+                        } else {
+                            Icons.Filled.Visibility
+                        },
+                        contentDescription = if (urlVisible) {
+                            "Hide stream URL"
+                        } else {
+                            "Show stream URL"
+                        },
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                },
-                singleLine = true,
-                visualTransformation = if (urlVisible) {
-                    VisualTransformation.None
-                } else {
-                    PasswordVisualTransformation()
-                },
-                trailingIcon = {
-                    IconButton(onClick = { urlVisible = !urlVisible }) {
-                        Icon(
-                            imageVector = if (urlVisible) {
-                                Icons.Filled.VisibilityOff
-                            } else {
-                                Icons.Filled.Visibility
-                            },
-                            contentDescription = if (urlVisible) {
-                                "Hide stream URL"
-                            } else {
-                                "Show stream URL"
-                            },
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                },
-                shape = RoundedCornerShape(12.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = MaterialTheme.colorScheme.onBackground,
-                    unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
+                }
+            },
+            shape = RoundedCornerShape(12.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 
