@@ -204,7 +204,6 @@ class StreamingEngine(private val context: Context) {
     }
 
     fun attachPreview(view: OpenGlView, context: android.content.Context) {
-        val firstAttach = !isPrepared
         if (!isPrepared) {
             val width = Prefs.videoWidth(context)
             val height = Prefs.videoHeight(context)
@@ -231,14 +230,15 @@ class StreamingEngine(private val context: Context) {
         }
         if (stream.isOnPreview) stream.stopPreview()
         stream.startPreview(view)
-        if (firstAttach) {
-            // Apply the overlay scene AFTER startPreview, so the GL render thread
-            // is live. Adding image filters to a not-yet-started pipeline loses
-            // them on a cold launch — the overlays would be missing until
-            // something forced a re-apply. BRB / camera-off / dual-cam PiP are
-            // separate mode-based filters managed elsewhere; not part of the scene.
-            overlayRenderer.applyScene(Prefs.overlayScene(context))
-        }
+        // Re-apply the overlay scene on every attach (not just the first one).
+        // When the app is backgrounded without being killed, the OpenGL surface
+        // gets torn down and the existing filters lose their GPU textures —
+        // they'd draw blank on return. Re-applying always is the simplest way
+        // to stay correct across both cold launches and background-resume.
+        // It does mean a web overlay reloads when you return from background.
+        // BRB / camera-off / dual-cam PiP are separate mode-based filters
+        // managed elsewhere; not part of the scene.
+        overlayRenderer.applyScene(Prefs.overlayScene(context))
     }
 
     fun detachPreview() {
