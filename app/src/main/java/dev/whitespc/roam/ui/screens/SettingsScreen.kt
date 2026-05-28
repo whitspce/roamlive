@@ -148,23 +148,23 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(28.dp),
         ) {
             Section(title = "Stream destination") {
+                DestinationBlock(
+                    streamUrl = streamUrl,
+                    onStreamUrlChange = { streamUrl = it },
+                )
+                Spacer(modifier = Modifier.height(10.dp))
                 Text(
-                    text = "Paste your platform's full RTMP URL: server URL and " +
-                        "stream key joined with a slash. " +
-                        "e.g. rtmp://live.twitch.tv/app/live_xxxxxxxx\n\n" +
-                        "SRT works too, for tougher handling of shaky connections: " +
-                        "srt://host:port/streamid (the stream id on the end is " +
-                        "required).\n\n" +
+                    text = "Paste your destination URL. RTMP and SRT are both " +
+                        "supported.\n\n" +
+                        "RTMP: your platform's server URL and stream key, joined " +
+                        "with a slash. e.g. rtmp://live.twitch.tv/app/live_xxxxxxxx\n\n" +
+                        "SRT: srt://host:port/streamid (the stream id on the end " +
+                        "is required).\n\n" +
                         "To stream to several platforms at once, point Roam at a " +
                         "restreaming service of your choice (such as Restream or " +
                         "Beamstream).",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                DestinationBlock(
-                    streamUrl = streamUrl,
-                    onStreamUrlChange = { streamUrl = it },
                 )
             }
             Section(title = "Microphone") {
