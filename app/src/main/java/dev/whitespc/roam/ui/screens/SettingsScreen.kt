@@ -156,8 +156,8 @@ fun SettingsScreen(
                 Text(
                     text = "Paste your destination URL. RTMP and SRT are both " +
                         "supported.\n\n" +
-                        "RTMP: your platform's server URL and stream key, joined " +
-                        "with a slash. e.g. rtmp://live.twitch.tv/app/live_xxxxxxxx\n\n" +
+                        "RTMP: your platform's server URL and stream key. " +
+                        "e.g. rtmp://live.twitch.tv/app/live_xxxxxxxx\n\n" +
                         "SRT: srt://host:port/streamid (the stream id on the end " +
                         "is required).\n\n" +
                         "To stream to several platforms at once, point Roam at a " +
