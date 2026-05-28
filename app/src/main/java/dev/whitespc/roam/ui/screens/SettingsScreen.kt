@@ -149,9 +149,12 @@ fun SettingsScreen(
         ) {
             Section(title = "Stream destination") {
                 Text(
-                    text = "Paste your platform's full RTMP URL — server URL and " +
+                    text = "Paste your platform's full RTMP URL: server URL and " +
                         "stream key joined with a slash. " +
                         "e.g. rtmp://live.twitch.tv/app/live_xxxxxxxx\n\n" +
+                        "SRT works too, for tougher handling of shaky connections: " +
+                        "srt://host:port/streamid (the stream id on the end is " +
+                        "required).\n\n" +
                         "To stream to several platforms at once, point Roam at a " +
                         "restreaming service of your choice (such as Restream or " +
                         "Beamstream).",
