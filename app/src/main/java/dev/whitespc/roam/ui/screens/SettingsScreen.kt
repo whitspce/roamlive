@@ -1,6 +1,7 @@
 package dev.whitespc.roam.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -50,6 +52,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -59,6 +62,7 @@ import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.width
+import dev.whitespc.roam.audio.MicDevices
 import dev.whitespc.roam.chat.ChatManager
 import dev.whitespc.roam.storage.Prefs
 import dev.whitespc.roam.ui.theme.RoamLive
@@ -158,6 +162,55 @@ fun SettingsScreen(
                 DestinationBlock(
                     streamUrl = streamUrl,
                     onStreamUrlChange = { streamUrl = it },
+                )
+            }
+            Section(title = "Microphone") {
+                Text(
+                    text = "Pick the mic Roam records from. USB and wired mics " +
+                        "sound best; Bluetooth uses a lower-quality voice codec.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                val micDevices = remember { MicDevices.list(context) }
+                val initialMicKey = remember(micDevices) {
+                    val name = Prefs.micDeviceName(context)
+                    val type = Prefs.micDeviceType(context)
+                    if (name != null && type != null) {
+                        micDevices.firstOrNull {
+                            it.productName == name && it.type == type
+                        }?.let { "${it.type}|${it.productName}" }
+                    } else {
+                        null
+                    }
+                }
+                var micKey by remember { mutableStateOf(initialMicKey) }
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    MicOption(
+                        label = "Default (system choice)",
+                        selected = micKey == null,
+                        onClick = {
+                            micKey = null
+                            Prefs.setMicDevice(context, null, null)
+                        },
+                    )
+                    micDevices.forEach { d ->
+                        val key = "${d.type}|${d.productName}"
+                        MicOption(
+                            label = d.label,
+                            selected = micKey == key,
+                            onClick = {
+                                micKey = key
+                                Prefs.setMicDevice(context, d.productName, d.type)
+                            },
+                        )
+                    }
+                }
+                Text(
+                    text = "Selection takes effect the next time you open the " +
+                        "main screen (the audio source is set up then).",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp,
                 )
             }
             Section(title = "Quality") {
@@ -517,6 +570,49 @@ private fun DestinationBlock(
                 unfocusedBorderColor = MaterialTheme.colorScheme.outline,
             ),
             modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+@Composable
+private fun MicOption(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable { onClick() }
+            .padding(vertical = 8.dp, horizontal = 6.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(18.dp)
+                .clip(CircleShape)
+                .border(
+                    width = if (selected) 2.dp else 1.5.dp,
+                    color = if (selected) RoamLive else MaterialTheme.colorScheme.outline,
+                    shape = CircleShape,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (selected) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(RoamLive),
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            text = label,
+            color = MaterialTheme.colorScheme.onBackground,
+            fontSize = 14.sp,
         )
     }
 }

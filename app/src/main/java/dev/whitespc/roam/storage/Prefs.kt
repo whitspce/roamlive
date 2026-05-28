@@ -25,6 +25,8 @@ object Prefs {
     private const val KEY_STEALTH_PULSE_SEC = "stealth_pulse_sec"
     private const val KEY_MAX_RECONNECT_MIN = "max_reconnect_min"
     private const val KEY_OVERLAY_SCENE_V1 = "overlay_scene_v1"
+    private const val KEY_MIC_DEVICE_NAME = "mic_device_name"
+    private const val KEY_MIC_DEVICE_TYPE = "mic_device_type"
 
     private const val DEFAULT_BRB_TEXT = "BE RIGHT BACK"
     private const val DEFAULT_STEALTH_PULSE_SEC = 30
@@ -159,5 +161,27 @@ object Prefs {
 
     fun setOverlayScene(context: Context, scene: Scene) {
         sp(context).edit().putString(KEY_OVERLAY_SCENE_V1, OverlayJson.toJson(scene)).apply()
+    }
+
+    /** Preferred mic device identity, persisted as (productName, type). Null
+     *  for either means "use the system default mic." */
+    fun micDeviceName(context: Context): String? =
+        sp(context).getString(KEY_MIC_DEVICE_NAME, null)?.takeIf { it.isNotBlank() }
+
+    fun micDeviceType(context: Context): Int? {
+        val v = sp(context).getInt(KEY_MIC_DEVICE_TYPE, -1)
+        return if (v >= 0) v else null
+    }
+
+    fun setMicDevice(context: Context, productName: String?, type: Int?) {
+        sp(context).edit().apply {
+            if (productName.isNullOrBlank() || type == null) {
+                remove(KEY_MIC_DEVICE_NAME)
+                remove(KEY_MIC_DEVICE_TYPE)
+            } else {
+                putString(KEY_MIC_DEVICE_NAME, productName)
+                putInt(KEY_MIC_DEVICE_TYPE, type)
+            }
+        }.apply()
     }
 }

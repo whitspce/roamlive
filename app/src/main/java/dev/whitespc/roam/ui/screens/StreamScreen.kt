@@ -437,15 +437,16 @@ private fun batteryDotColor(percent: Int): Color = when {
 
 @Composable
 private fun ThermalBanner(text: String, onDismiss: () -> Unit) {
-    LaunchedEffect(text) {
-        kotlinx.coroutines.delay(6000)
-        onDismiss()
-    }
+    // No auto-dismiss: the banner stays as long as the engine reports a thermal
+    // notice — set while the device is warm/hot, cleared when it returns to
+    // normal. A 6-second toast was trivially missable while driving. Amber, not
+    // brand green, so it reads as a warning. Tap to dismiss; it returns on the
+    // next thermal change.
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .clip(RoundedCornerShape(10.dp))
-            .background(RoamLive.copy(alpha = 0.92f))
+            .background(Color(0xFFE8861E).copy(alpha = 0.95f))
             .padding(horizontal = 12.dp, vertical = 8.dp)
             .pointerInput(Unit) { detectTapGestures { onDismiss() } },
     ) {

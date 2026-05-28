@@ -19,6 +19,7 @@ import com.pedro.library.generic.GenericStream
 import com.pedro.library.util.streamclient.GenericStreamClient
 import com.pedro.library.view.OpenGlView
 import dev.whitespc.roam.NetworkMonitor
+import dev.whitespc.roam.audio.MicDevices
 import dev.whitespc.roam.storage.Prefs
 import dev.whitespc.roam.streaming.overlay.OverlayRenderer
 import kotlinx.coroutines.CompletableDeferred
@@ -227,6 +228,20 @@ class StreamingEngine(private val context: Context) {
                 return
             }
             isPrepared = true
+
+            // Apply the user's preferred mic device if they picked one and it's
+            // currently present. If the saved device isn't plugged in, the
+            // resolver returns null and we fall through to the system default.
+            val micDevice = MicDevices.find(
+                context,
+                Prefs.micDeviceName(context),
+                Prefs.micDeviceType(context),
+            )
+            if (micDevice != null) {
+                runCatching {
+                    (stream.audioSource as? MicrophoneSource)?.setPreferredDevice(micDevice.info)
+                }.onFailure { Log.w(TAG, "setPreferredDevice failed", it) }
+            }
         }
         if (stream.isOnPreview) stream.stopPreview()
         stream.startPreview(view)
@@ -616,7 +631,9 @@ class StreamingEngine(private val context: Context) {
             PowerManager.THERMAL_STATUS_SEVERE -> {
                 val target = (configuredBitrate * 0.4).toInt()
                 runCatching { stream.setVideoBitrateOnFly(target) }
-                _thermalNotice.value = "Phone hot, bitrate dropped to ${target / 1000} kbps"
+                _thermalNotice.value =
+                    "Phone hot — bitrate dropped to ${target / 1000} kbps. " +
+                        "Stealth mode (screen off) helps it cool."
             }
             PowerManager.THERMAL_STATUS_CRITICAL,
             PowerManager.THERMAL_STATUS_EMERGENCY,
