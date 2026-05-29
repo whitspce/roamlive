@@ -60,6 +60,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -88,11 +89,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
-// The nine anchor presets, as (label, xPercent, yPercent) centre coordinates.
+// The nine anchor presets, as (label, x, y) on the 0–100 position scale
+// (0 = flush start edge, 50 = centred, 100 = flush end edge). Quick jumps; the
+// X/Y sliders fine-tune from there.
 private val ANCHORS = listOf(
-    Triple("TL", 15f, 12f), Triple("T", 50f, 12f), Triple("TR", 85f, 12f),
-    Triple("L", 15f, 50f), Triple("C", 50f, 50f), Triple("R", 85f, 50f),
-    Triple("BL", 15f, 88f), Triple("B", 50f, 88f), Triple("BR", 85f, 88f),
+    Triple("TL", 0f, 0f), Triple("T", 50f, 0f), Triple("TR", 100f, 0f),
+    Triple("L", 0f, 50f), Triple("C", 50f, 50f), Triple("R", 100f, 50f),
+    Triple("BL", 0f, 100f), Triple("B", 50f, 100f), Triple("BR", 100f, 100f),
 )
 
 private val CANVAS_NAVY = Color(0xFF13243F)
@@ -393,9 +396,10 @@ private fun EditorCanvas(scene: Scene, selectedId: String?) {
                 .filter { it.visible }
                 .sortedBy { it.zOrder }
                 .forEach { item ->
+                    val alignment = itemAlignment(item)
                     Box(
                         modifier = Modifier
-                            .align(positionToAlignment(item.xPercent, item.yPercent))
+                            .align(alignment)
                             .then(
                                 if (item.id == selectedId) {
                                     Modifier.border(1.5.dp, RoamLive, RoundedCornerShape(3.dp))
@@ -405,9 +409,9 @@ private fun EditorCanvas(scene: Scene, selectedId: String?) {
                             )
                             .padding(2.dp),
                         // An over-100% image is larger than this box; align its
-                        // overflow toward the item's own anchor so it spills the
+                        // overflow toward the item's own position so it spills the
                         // same way the broadcast renders it.
-                        contentAlignment = positionToAlignment(item.xPercent, item.yPercent),
+                        contentAlignment = alignment,
                     ) {
                         CanvasItem(item, canvasWidth, canvasHeight)
                     }
@@ -416,8 +420,20 @@ private fun EditorCanvas(scene: Scene, selectedId: String?) {
     }
 }
 
+/** Canvas placement for an item, mirroring the renderer exactly. User overlays
+ *  use a precise bias from their 0–100 x/y (matches the renderer's
+ *  applyPrecisePosition); the watermark stays on the 3×3 snap (matches its
+ *  applyPosition path), so preview and broadcast always agree. */
+private fun itemAlignment(item: OverlayItem): Alignment =
+    if (item.source is OverlaySource.Watermark) {
+        positionToAlignment(item.xPercent, item.yPercent)
+    } else {
+        BiasAlignment(item.xPercent / 50f - 1f, item.yPercent / 50f - 1f)
+    }
+
 /** Maps a centre-coord percent position to the Compose Alignment that mirrors
- *  RootEncoder's TranslateTo grid — keep in lockstep with the renderer. */
+ *  RootEncoder's TranslateTo grid — used for the watermark, kept in lockstep with
+ *  the renderer's snap path. */
 private fun positionToAlignment(x: Float, y: Float): Alignment {
     val col = when {
         x < 33f -> 0
@@ -887,6 +903,18 @@ private fun SelectedItemControls(
             AnchorGrid(
                 current = item.xPercent to item.yPercent,
                 onPick = { (x, y) -> onChange(item.copy(xPercent = x, yPercent = y)) },
+            )
+            LabeledSlider(
+                label = "X",
+                value = item.xPercent,
+                range = 0f..100f,
+                onChange = { onChange(item.copy(xPercent = it)) },
+            )
+            LabeledSlider(
+                label = "Y",
+                value = item.yPercent,
+                range = 0f..100f,
+                onChange = { onChange(item.copy(yPercent = it)) },
             )
         }
 

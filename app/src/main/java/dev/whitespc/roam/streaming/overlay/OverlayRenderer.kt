@@ -31,9 +31,11 @@ private const val TAG = "RoamOverlayRenderer"
  * each is a live WebView with its own lifecycle, so they're delegated to a
  * [WebOverlayController] and tracked separately from [activeFilters].
  *
- * Position handling: items store centre coords as percentages. The renderer maps
- * those to RootEncoder's [TranslateTo] enum (a 3×3 grid of anchor points). Web
- * overlays ignore position — they render full-frame.
+ * Position handling: items store a 0–100 x/y position. User overlays (text,
+ * image) are placed precisely via [applyPrecisePosition] (0 = flush start edge,
+ * 50 = centred, 100 = flush end edge). The watermark stays on the legacy 3×3
+ * anchor snap ([applyPosition]) so the branding can't drift. Web overlays ignore
+ * position — they render full-frame.
  */
 class OverlayRenderer(
     private val context: Context,
@@ -142,7 +144,7 @@ class OverlayRenderer(
         runCatching {
             filter.setText(OverlayTokens.resolve(source.text), source.fontSizeSp, source.colorArgb)
             filter.setDefaultScale(Prefs.videoWidth(context), Prefs.videoHeight(context))
-            applyPosition(filter, item.xPercent, item.yPercent)
+            applyPrecisePosition(filter, item.xPercent, item.yPercent)
         }.onFailure { Log.w(TAG, "text filter config failed", it) }
     }
 
@@ -152,7 +154,7 @@ class OverlayRenderer(
             ImageObjectFilterRender().apply {
                 setImage(bitmap)
                 setScale(item.widthPercent, item.heightPercent)
-                applyPosition(this, item.xPercent, item.yPercent)
+                applyPrecisePosition(this, item.xPercent, item.yPercent)
             }
         }.onFailure { Log.w(TAG, "image filter failed", it) }.getOrNull()
 
@@ -202,6 +204,24 @@ class OverlayRenderer(
         } else {
             filter.setPosition(translate)
         }
+    }
+
+    /**
+     * Precise free positioning for user overlays (text / image). x and y are a
+     * 0–100 position: 0 = flush to the start edge, 50 = centred, 100 = flush to the
+     * end edge. We map that onto the object's top-left so it stays fully on-frame at
+     * both extremes: top-left = (x/100)·(100 − scaleWidth). Uses the explicit
+     * setPosition(float, float), which sidesteps the Sprite.translate(CENTER) bug
+     * (that lived only in the enum path). The editor canvas mirrors this exactly
+     * with BiasAlignment, so preview and broadcast agree.
+     */
+    private fun applyPrecisePosition(filter: BaseObjectFilterRender, xPercent: Float, yPercent: Float) {
+        runCatching {
+            val scale = filter.scale
+            val left = (xPercent / 100f) * (100f - scale.x)
+            val top = (yPercent / 100f) * (100f - scale.y)
+            filter.setPosition(left, top)
+        }.onFailure { Log.w(TAG, "precise position failed", it) }
     }
 
     /** Re-render token-bearing text once a second so {time}/{date} stay current.
