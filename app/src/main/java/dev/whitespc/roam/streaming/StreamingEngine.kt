@@ -186,6 +186,22 @@ class StreamingEngine(private val context: Context) {
 
     private var isPrepared = false
 
+    // The OpenGlView the encoder is currently previewing into. Kept so we can
+    // re-prepare the encoder (resolution/fps change) while idle without the UI
+    // having to hand the view back. Set on every attachPreview.
+    private var currentView: OpenGlView? = null
+
+    // What the encoder was last prepared with. Compared against current prefs in
+    // syncConfig to decide whether an idle re-prepare is needed. This used to
+    // happen for free because navigating to Settings tore the engine down and
+    // recreated it; now the engine survives navigation, so we re-apply explicitly.
+    private var preparedWidth = 0
+    private var preparedHeight = 0
+    private var preparedFps = 0
+    private var preparedBitrate = 0
+    private var preparedMicName: String? = null
+    private var preparedMicType: Int? = null
+
     init {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && thermalListener != null) {
             powerManager?.addThermalStatusListener(thermalListener)
@@ -205,6 +221,7 @@ class StreamingEngine(private val context: Context) {
     }
 
     fun attachPreview(view: OpenGlView, context: android.content.Context) {
+        currentView = view
         if (!isPrepared) {
             val width = Prefs.videoWidth(context)
             val height = Prefs.videoHeight(context)
@@ -228,20 +245,11 @@ class StreamingEngine(private val context: Context) {
                 return
             }
             isPrepared = true
-
-            // Apply the user's preferred mic device if they picked one and it's
-            // currently present. If the saved device isn't plugged in, the
-            // resolver returns null and we fall through to the system default.
-            val micDevice = MicDevices.find(
-                context,
-                Prefs.micDeviceName(context),
-                Prefs.micDeviceType(context),
-            )
-            if (micDevice != null) {
-                runCatching {
-                    (stream.audioSource as? MicrophoneSource)?.setPreferredDevice(micDevice.info)
-                }.onFailure { Log.w(TAG, "setPreferredDevice failed", it) }
-            }
+            preparedWidth = width
+            preparedHeight = height
+            preparedFps = fps
+            preparedBitrate = bitrate
+            applyPreferredMic(context)
         }
         if (stream.isOnPreview) stream.stopPreview()
         stream.startPreview(view)
@@ -258,6 +266,82 @@ class StreamingEngine(private val context: Context) {
 
     fun detachPreview() {
         if (stream.isOnPreview) stream.stopPreview()
+    }
+
+    /** Apply the user's preferred mic if one is picked and currently present. If the
+     *  saved device isn't plugged in, the resolver returns null and we leave the
+     *  system default in place. Records what we applied so syncConfig can detect a
+     *  later change. */
+    private fun applyPreferredMic(context: Context) {
+        val name = Prefs.micDeviceName(context)
+        val type = Prefs.micDeviceType(context)
+        val micDevice = MicDevices.find(context, name, type)
+        if (micDevice != null) {
+            runCatching {
+                (stream.audioSource as? MicrophoneSource)?.setPreferredDevice(micDevice.info)
+            }.onFailure { Log.w(TAG, "setPreferredDevice failed", it) }
+        }
+        preparedMicName = name
+        preparedMicType = type
+    }
+
+    /** Re-apply settings that changed while idle. Settings now draws on top of the
+     *  streaming screen rather than replacing it, so the engine survives navigation
+     *  and no longer re-reads prefs via a recreate. We do it here, explicitly, at the
+     *  safe idle moment (Settings closing). No-op while streaming: resolution / fps /
+     *  mic can't change live and are greyed in the UI; bitrate is handled separately
+     *  by setBitrate. Always re-applies the overlay scene so overlay edits show. */
+    fun syncConfig(context: Context) {
+        if (stream.isStreaming || !isPrepared) return
+        val view = currentView ?: return
+        val width = Prefs.videoWidth(context)
+        val height = Prefs.videoHeight(context)
+        val fps = Prefs.videoFps(context)
+        val bitrate = Prefs.videoBitrateKbps(context) * 1000
+        val micName = Prefs.micDeviceName(context)
+        val micType = Prefs.micDeviceType(context)
+        val videoChanged = width != preparedWidth || height != preparedHeight ||
+            fps != preparedFps || bitrate != preparedBitrate
+        val micChanged = micName != preparedMicName || micType != preparedMicType
+        if (!videoChanged && !micChanged) {
+            applyScene(context)
+            return
+        }
+        runCatching {
+            if (stream.isOnPreview) stream.stopPreview()
+            val videoOk = stream.prepareVideo(width, height, bitrate, fps, VIDEO_GOP_SECONDS)
+            val audioOk = stream.prepareAudio(AUDIO_SAMPLE_RATE, AUDIO_STEREO, AUDIO_BITRATE)
+            if (videoOk && audioOk) {
+                preparedWidth = width
+                preparedHeight = height
+                preparedFps = fps
+                preparedBitrate = bitrate
+                applyPreferredMic(context)
+            } else {
+                Log.e(TAG, "syncConfig re-prepare failed video=$videoOk audio=$audioOk")
+            }
+            // Always restore preview, even if prepare failed, so the screen isn't
+            // left black. Re-apply the scene since stopPreview drops GL textures.
+            stream.startPreview(view)
+            overlayRenderer.applyScene(Prefs.overlayScene(context))
+        }.onFailure { Log.w(TAG, "syncConfig failed", it) }
+    }
+
+    /** Re-apply the saved overlay scene to the live pipeline. Called when returning
+     *  from the overlay editor, since the engine is no longer recreated on the way
+     *  back. Safe whether idle or streaming (the renderer swaps filters live). */
+    fun applyScene(context: Context) {
+        runCatching { overlayRenderer.applyScene(Prefs.overlayScene(context)) }
+            .onFailure { Log.w(TAG, "applyScene failed", it) }
+    }
+
+    /** Apply a new video bitrate to the running stream immediately. Bitrate is the
+     *  one quality setting RootEncoder can change mid-stream. No-op when not
+     *  streaming; the value is then picked up by syncConfig / prepare next time. */
+    fun setBitrate(kbps: Int) {
+        if (!stream.isStreaming) return
+        runCatching { stream.setVideoBitrateOnFly(kbps * 1000) }
+            .onFailure { Log.w(TAG, "setBitrate failed", it) }
     }
 
     fun start(url: String) {

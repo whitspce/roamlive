@@ -28,6 +28,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.FilterChip
@@ -53,6 +54,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -79,6 +81,8 @@ private val FpsOptions = listOf(30, 60)
 
 @Composable
 fun SettingsScreen(
+    isLive: Boolean,
+    onApplyLiveBitrate: (Int) -> Unit,
     onClose: () -> Unit,
     onOpenOverlays: () -> Unit,
 ) {
@@ -112,7 +116,11 @@ fun SettingsScreen(
     }
     LaunchedEffect(fps) { Prefs.setVideoFps(context, fps) }
     LaunchedEffect(bitrateText) {
-        bitrateText.toIntOrNull()?.let { Prefs.setVideoBitrateKbps(context, it) }
+        bitrateText.toIntOrNull()?.let {
+            Prefs.setVideoBitrateKbps(context, it)
+            // No-op when not streaming; applies on the fly when live.
+            onApplyLiveBitrate(it)
+        }
     }
     LaunchedEffect(chatEnabled, kickChannel) {
         Prefs.setChatEnabled(context, chatEnabled)
@@ -147,11 +155,15 @@ fun SettingsScreen(
                 .padding(top = 8.dp, bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(28.dp),
         ) {
-            Section(title = "Stream destination") {
+            Section(title = "Stream destination", locked = isLive) {
                 DestinationBlock(
                     streamUrl = streamUrl,
                     onStreamUrlChange = { streamUrl = it },
+                    enabled = !isLive,
                 )
+                if (isLive) {
+                    LiveLockNote("Stop the stream to change where it goes.")
+                }
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
                     text = "Paste your destination URL. RTMP and SRT are both " +
@@ -167,7 +179,7 @@ fun SettingsScreen(
                     fontSize = 12.sp,
                 )
             }
-            Section(title = "Microphone") {
+            Section(title = "Microphone", locked = isLive) {
                 Text(
                     text = "Pick the mic Roam records from. USB and wired mics " +
                         "sound best; Bluetooth uses a lower-quality voice codec.",
@@ -196,6 +208,7 @@ fun SettingsScreen(
                             micKey = null
                             Prefs.setMicDevice(context, null, null)
                         },
+                        enabled = !isLive,
                     )
                     micDevices.forEach { d ->
                         val key = "${d.type}|${d.productName}"
@@ -206,29 +219,38 @@ fun SettingsScreen(
                                 micKey = key
                                 Prefs.setMicDevice(context, d.productName, d.type)
                             },
+                            enabled = !isLive,
                         )
                     }
                 }
                 Text(
-                    text = "Selection takes effect the next time you open the " +
-                        "main screen (the audio source is set up then).",
+                    text = if (isLive) {
+                        "Can't change the mic while you're live. Stop the stream first."
+                    } else {
+                        "Applies when you return to the stream screen."
+                    },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 11.sp,
                 )
             }
+            // Not section-locked: Quality is mixed — resolution/fps lock while live
+            // but bitrate stays editable, so the per-control greying carries it and
+            // we don't tint the whole block (which made editable bitrate look locked).
             Section(title = "Quality") {
-                FieldLabel("Resolution")
+                LockableFieldLabel("Resolution", locked = isLive)
                 ChipRow(
                     options = Resolutions.mapIndexed { idx, r -> idx to r.label },
                     selected = resolutionIndex,
                     onSelect = { resolutionIndex = it },
+                    enabled = !isLive,
                 )
                 Spacer(modifier = Modifier.height(16.dp))
-                FieldLabel("Frame rate")
+                LockableFieldLabel("Frame rate", locked = isLive)
                 ChipRow(
                     options = FpsOptions.map { it to "$it fps" },
                     selected = fps,
                     onSelect = { fps = it },
+                    enabled = !isLive,
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 LabeledField(
@@ -238,6 +260,12 @@ fun SettingsScreen(
                     placeholder = "2500",
                     keyboardType = KeyboardType.Number,
                 )
+                if (isLive) {
+                    LiveLockNote(
+                        "Resolution and frame rate can't change mid-stream. " +
+                            "Bitrate can.",
+                    )
+                }
             }
             Section(title = "Auto-reconnect") {
                 Text(
@@ -466,22 +494,56 @@ private fun TopBar(onClose: () -> Unit) {
 }
 
 @Composable
-private fun Section(title: String, content: @Composable () -> Unit) {
+private fun Section(
+    title: String,
+    locked: Boolean = false,
+    content: @Composable () -> Unit,
+) {
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-                text = title.uppercase(),
-                color = MaterialTheme.colorScheme.onBackground,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.6.sp,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = title.uppercase(),
+                    color = MaterialTheme.colorScheme.onBackground,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.6.sp,
+                )
+                if (locked) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    LockBadge()
+                }
+            }
             HorizontalDivider(
-                color = RoamLive,
+                color = if (locked) MaterialTheme.colorScheme.outline else RoamLive,
                 thickness = 1.dp,
             )
         }
         content()
+    }
+}
+
+/** Amber lock icon marking a control that can't be changed while streaming. The
+ *  single consistent "locked while live" tell: on a section title when the whole
+ *  section is locked, on a field label when only that field is. */
+@Composable
+private fun LockBadge() {
+    Icon(
+        imageVector = Icons.Filled.Lock,
+        contentDescription = "Locked while streaming",
+        tint = Color(0xFFE8861E),
+        modifier = Modifier.size(14.dp),
+    )
+}
+
+@Composable
+private fun LockableFieldLabel(text: String, locked: Boolean) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        FieldLabel(text)
+        if (locked) {
+            Spacer(modifier = Modifier.width(6.dp))
+            LockBadge()
+        }
     }
 }
 
@@ -529,6 +591,7 @@ private fun LabeledField(
 private fun DestinationBlock(
     streamUrl: String,
     onStreamUrlChange: (String) -> Unit,
+    enabled: Boolean = true,
 ) {
     var urlVisible by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -536,6 +599,7 @@ private fun DestinationBlock(
         OutlinedTextField(
             value = streamUrl,
             onValueChange = onStreamUrlChange,
+            enabled = enabled,
             placeholder = {
                 Text(
                     text = "rtmp://server/app/key",
@@ -582,13 +646,14 @@ private fun MicOption(
     label: String,
     selected: Boolean,
     onClick: () -> Unit,
+    enabled: Boolean = true,
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .clickable { onClick() }
+            .clickable(enabled = enabled) { onClick() }
             .padding(vertical = 8.dp, horizontal = 6.dp),
     ) {
         Box(
@@ -614,7 +679,11 @@ private fun MicOption(
         Spacer(modifier = Modifier.width(10.dp))
         Text(
             text = label,
-            color = MaterialTheme.colorScheme.onBackground,
+            color = if (enabled) {
+                MaterialTheme.colorScheme.onBackground
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
             fontSize = 14.sp,
         )
     }
@@ -625,12 +694,14 @@ private fun <T> ChipRow(
     options: List<Pair<T, String>>,
     selected: T,
     onSelect: (T) -> Unit,
+    enabled: Boolean = true,
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         options.forEach { (value, label) ->
             FilterChip(
                 selected = value == selected,
                 onClick = { onSelect(value) },
+                enabled = enabled,
                 label = { Text(label) },
                 colors = FilterChipDefaults.filterChipColors(
                     selectedContainerColor = MaterialTheme.colorScheme.primary,
@@ -639,4 +710,13 @@ private fun <T> ChipRow(
             )
         }
     }
+}
+
+@Composable
+private fun LiveLockNote(text: String) {
+    Text(
+        text = text,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 11.sp,
+    )
 }

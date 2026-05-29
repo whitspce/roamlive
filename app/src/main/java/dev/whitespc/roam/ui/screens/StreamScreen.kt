@@ -39,6 +39,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -86,6 +87,7 @@ private enum class Screen { Main, Settings, Overlays }
 @Composable
 fun StreamScreen(modifier: Modifier = Modifier) {
     var screen by rememberSaveable { mutableStateOf(Screen.Main) }
+    val context = LocalContext.current
 
     Box(
         modifier = modifier
@@ -93,18 +95,37 @@ fun StreamScreen(modifier: Modifier = Modifier) {
             .background(MaterialTheme.colorScheme.background),
     ) {
         PermissionGate {
+            // The engine lives here, above the sub-screens, so it survives navigating
+            // to Settings/Overlays. Those draw on TOP of the always-mounted streaming
+            // surface rather than replacing it, so the stream and GL pipeline are never
+            // torn down mid-stream. Released only when this whole screen goes away.
+            val engine = remember { StreamingEngine(context) }
+            val state by engine.state.collectAsState()
+            val isLive = state is StreamState.Live ||
+                state == StreamState.Connecting ||
+                state is StreamState.Reconnecting
+            DisposableEffect(engine) {
+                onDispose { engine.release() }
+            }
+
+            StreamSurface(engine = engine, onOpenSettings = { screen = Screen.Settings })
+
             when (screen) {
-                Screen.Main -> StreamSurface(onOpenSettings = { screen = Screen.Settings })
+                Screen.Main -> Unit
                 Screen.Settings -> {
-                    BackHandler { screen = Screen.Main }
+                    BackHandler { screen = Screen.Main; engine.syncConfig(context) }
                     SettingsScreen(
-                        onClose = { screen = Screen.Main },
+                        isLive = isLive,
+                        onApplyLiveBitrate = { engine.setBitrate(it) },
+                        onClose = { screen = Screen.Main; engine.syncConfig(context) },
                         onOpenOverlays = { screen = Screen.Overlays },
                     )
                 }
                 Screen.Overlays -> {
-                    BackHandler { screen = Screen.Settings }
-                    OverlayEditorScreen(onClose = { screen = Screen.Settings })
+                    BackHandler { screen = Screen.Settings; engine.applyScene(context) }
+                    OverlayEditorScreen(
+                        onClose = { screen = Screen.Settings; engine.applyScene(context) },
+                    )
                 }
             }
         }
@@ -112,9 +133,8 @@ fun StreamScreen(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun StreamSurface(onOpenSettings: () -> Unit) {
+private fun StreamSurface(engine: StreamingEngine, onOpenSettings: () -> Unit) {
     val context = LocalContext.current
-    val engine = remember { StreamingEngine(context) }
     val state by engine.state.collectAsState()
     val chatEnabled = remember { Prefs.chatEnabled(context) }
     val kickChannel = remember { Prefs.kickChannel(context) }
@@ -218,13 +238,11 @@ private fun StreamSurface(onOpenSettings: () -> Unit) {
                     .align(Alignment.TopEnd)
                     .padding(16.dp),
             ) {
-                if (!streamActive) {
-                    IconChip(
-                        icon = Icons.Filled.Settings,
-                        description = "Settings",
-                        onClick = onOpenSettings,
-                    )
-                }
+                IconChip(
+                    icon = Icons.Filled.Settings,
+                    description = "Settings",
+                    onClick = onOpenSettings,
+                )
                 IconChip(
                     icon = Icons.Filled.FlipCameraAndroid,
                     description = if (isDualCamOn) "Swap main and PiP cameras" else "Switch camera",
@@ -282,9 +300,20 @@ private fun StreamSurface(onOpenSettings: () -> Unit) {
                 )
             }
 
+            val canGoLive = streamActive || Prefs.streamUrl(context).isNotBlank()
+            // TEMP diagnostic: chasing an intermittent dark/unclickable Go Live button
+            // seen with a valid URL saved. Keyed on canGoLive only (not state) so it
+            // logs just the enable/disable transitions, not every per-second bitrate
+            // tick. Tag RoamGoLive. Remove once the bug is understood.
+            LaunchedEffect(canGoLive) {
+                android.util.Log.d(
+                    "RoamGoLive",
+                    "enabled=$canGoLive state=$state urlPresent=${Prefs.streamUrl(context).isNotBlank()}",
+                )
+            }
             LiveButton(
                 state = state,
-                enabled = streamActive || Prefs.streamUrl(context).isNotBlank(),
+                enabled = canGoLive,
                 onGoLive = {
                     StreamingService.start(context)
                     engine.start(Prefs.streamUrl(context))

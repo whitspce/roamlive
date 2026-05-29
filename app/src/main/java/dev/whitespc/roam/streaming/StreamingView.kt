@@ -66,7 +66,10 @@ fun StreamingView(
         openGlView.holder.addCallback(callback)
         onDispose {
             openGlView.holder.removeCallback(callback)
-            engine.release()
+            // Engine lifecycle is owned by StreamScreen now (it outlives this view so
+            // the stream survives navigating to Settings/Overlays). Just stop preview;
+            // do NOT release the engine here.
+            engine.detachPreview()
         }
     }
 
