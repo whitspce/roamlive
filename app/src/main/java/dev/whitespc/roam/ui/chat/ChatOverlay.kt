@@ -35,7 +35,11 @@ fun ChatOverlay(
 ) {
     val listState = rememberLazyListState()
 
-    LaunchedEffect(messages.size) {
+    // Key on the last message, not messages.size. The buffer caps at 200, so once
+    // a busy chat saturates, the size stops changing and a size-keyed effect would
+    // never fire again — auto-scroll would silently die mid-stream while new
+    // messages keep arriving. The last message changes on every append.
+    LaunchedEffect(messages.lastOrNull()) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.lastIndex)
         }
