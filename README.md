@@ -2,7 +2,7 @@
 
 [**roamlive.app**](https://roamlive.app)
 
-# Roam Live
+## About Roam Live
 
 IRL streaming app built for Andriod only. Currently in Early Alpha as it's still in active development.
 Built to be easy enough to immediately go live from your phone but feature rich enough that you could stay on it for a while without needing to get a server. Specifically built for IRL streaming on Andriod.
