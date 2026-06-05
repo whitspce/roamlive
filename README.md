@@ -1,27 +1,17 @@
-# Roam Live
-
-IRL streaming app built for Andriod only.
-Easy enough to immediately go live from your phone but feature rich enough to include most of what you would need for IRL streaming.
-
-Features:
-- Chat panel (Twitch + Kick) just for the streamer so they can read chat while streaming.
-- Stealth mode for discretion in public (Screen goes black but stream continues)
-- BRB screen with customisable text + auto camera and mic mute.
-- Predictive thermal management with auto bitrate degradation before phone throttles
-- No google play services required, no telemetry, no analytics, private and open source by design. The app only ever checks to see if there's a new version available.
-
-Built on [RootEncoder] for the streaming pipeline; [Jetpack Compose] for UI.
-
-[RootEncoder]: https://github.com/pedroSG94/RootEncoder
-[Jetpack Compose]: https://developer.android.com/jetpack/compose
-
 ## Website + download
 
 [**roamlive.app**](https://roamlive.app)
 
-## Status
+# Roam Live
 
-Active development. v0.1.x is feature-complete for a very basic v1 launch to be released for testing.
+IRL streaming app built for Andriod only. Currently in Early Alpha as it's still in active development.
+Built to be easy enough to immediately go live from your phone but feature rich enough that you could stay on it for a while without needing to get a server. Specifically built for IRL streaming on Andriod.
+
+- No Google Play services required (Great for grapheneOS), no telemetry or analytics collected. Fully open source and private by design.
+
+Built on [RootEncoder] for the streaming pipeline; [Jetpack Compose] for UI.
+[RootEncoder]: https://github.com/pedroSG94/RootEncoder
+[Jetpack Compose]: https://developer.android.com/jetpack/compose
 
 ## Build from source
 
