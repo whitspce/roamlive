@@ -62,12 +62,22 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.rememberCoroutineScope
 import dev.whitespc.roam.audio.MicDevices
 import dev.whitespc.roam.chat.ChatManager
 import dev.whitespc.roam.storage.Prefs
+import dev.whitespc.roam.streaming.overlay.OverlayImageStore
 import dev.whitespc.roam.ui.theme.RoamLive
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private data class Resolution(val width: Int, val height: Int, val label: String)
 
@@ -83,10 +93,12 @@ private val FpsOptions = listOf(30, 60)
 fun SettingsScreen(
     isLive: Boolean,
     onApplyLiveBitrate: (Int) -> Unit,
+    onApplyStabilization: () -> Unit,
     onClose: () -> Unit,
     onOpenOverlays: () -> Unit,
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     var streamUrl by remember { mutableStateOf(Prefs.streamUrl(context)) }
     var resolutionIndex by remember {
@@ -104,10 +116,12 @@ fun SettingsScreen(
     var kickChannel by remember { mutableStateOf(Prefs.kickChannel(context)) }
     var twitchChannel by remember { mutableStateOf(Prefs.twitchChannel(context)) }
     var brbText by remember { mutableStateOf(Prefs.brbText(context)) }
+    var brbImagePath by remember { mutableStateOf(Prefs.brbImagePath(context)) }
     var stealthDot by remember { mutableStateOf(Prefs.stealthDot(context)) }
     var stealthHaptic by remember { mutableStateOf(Prefs.stealthHaptic(context)) }
     var stealthPulseSec by remember { mutableIntStateOf(Prefs.stealthPulseSeconds(context)) }
     var maxReconnectMin by remember { mutableIntStateOf(Prefs.maxReconnectMinutes(context)) }
+    var stabilizationEnabled by remember { mutableStateOf(Prefs.stabilizationEnabled(context)) }
 
     LaunchedEffect(streamUrl) { Prefs.setStreamUrl(context, streamUrl) }
     LaunchedEffect(resolutionIndex) {
@@ -134,10 +148,34 @@ fun SettingsScreen(
     LaunchedEffect(brbText) {
         Prefs.setBrbText(context, brbText)
     }
+    LaunchedEffect(brbImagePath) { Prefs.setBrbImagePath(context, brbImagePath) }
+
+    // Picker for the optional custom BRB image. Imports into app-private storage
+    // via OverlayImageStore (reused from the overlay editor), and replaces any
+    // previously-set BRB image so only one is on disk at a time.
+    val brbImagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val previous = brbImagePath
+        scope.launch {
+            val newPath = withContext(Dispatchers.IO) {
+                OverlayImageStore.importImage(context, uri)
+            } ?: return@launch
+            brbImagePath = newPath
+            if (previous != null) {
+                withContext(Dispatchers.IO) { OverlayImageStore.deleteImage(previous) }
+            }
+        }
+    }
     LaunchedEffect(stealthDot) { Prefs.setStealthDot(context, stealthDot) }
     LaunchedEffect(stealthHaptic) { Prefs.setStealthHaptic(context, stealthHaptic) }
     LaunchedEffect(stealthPulseSec) { Prefs.setStealthPulseSeconds(context, stealthPulseSec) }
     LaunchedEffect(maxReconnectMin) { Prefs.setMaxReconnectMinutes(context, maxReconnectMin) }
+    LaunchedEffect(stabilizationEnabled) {
+        Prefs.setStabilizationEnabled(context, stabilizationEnabled)
+        onApplyStabilization()
+    }
 
     Column(
         modifier = Modifier
@@ -231,6 +269,15 @@ fun SettingsScreen(
                     },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 11.sp,
+                )
+            }
+            Section(title = "Camera") {
+                ToggleRow(
+                    label = "Image stabilization",
+                    description = "Smooths out shaky handheld footage. " +
+                        "Slightly crops the frame; not all phones support it.",
+                    checked = stabilizationEnabled,
+                    onCheckedChange = { stabilizationEnabled = it },
                 )
             }
             // Not section-locked: Quality is mixed — resolution/fps lock while live
@@ -332,10 +379,76 @@ fun SettingsScreen(
                     placeholder = "BE RIGHT BACK",
                 )
                 Text(
-                    text = "Shown full-screen with audio muted when you tap the break icon.",
+                    text = "Shown full-screen with audio muted when you tap the break icon. " +
+                        "If you set a custom image below, the image is shown instead of the text.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
                 )
+                Spacer(modifier = Modifier.height(4.dp))
+                FieldLabel("Custom break image (optional)")
+                if (brbImagePath == null) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                brbImagePicker.launch(
+                                    PickVisualMediaRequest(
+                                        ActivityResultContracts.PickVisualMedia.ImageOnly,
+                                    ),
+                                )
+                            }
+                            .padding(vertical = 10.dp, horizontal = 6.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Image,
+                            contentDescription = null,
+                            tint = RoamLive,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Choose image from phone",
+                            color = MaterialTheme.colorScheme.onBackground,
+                            fontSize = 14.sp,
+                        )
+                    }
+                } else {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp, horizontal = 6.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Image,
+                            contentDescription = null,
+                            tint = RoamLive,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Custom image set",
+                            color = MaterialTheme.colorScheme.onBackground,
+                            fontSize = 14.sp,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(
+                            onClick = {
+                                val previous = brbImagePath
+                                brbImagePath = null
+                                if (previous != null) {
+                                    scope.launch(Dispatchers.IO) {
+                                        OverlayImageStore.deleteImage(previous)
+                                    }
+                                }
+                            },
+                        ) {
+                            Text(text = "Clear", color = RoamLive)
+                        }
+                    }
+                }
             }
             Section(title = "Stealth mode") {
                 Text(

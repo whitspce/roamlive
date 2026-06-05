@@ -51,6 +51,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
@@ -117,6 +118,7 @@ fun StreamScreen(modifier: Modifier = Modifier) {
                     SettingsScreen(
                         isLive = isLive,
                         onApplyLiveBitrate = { engine.setBitrate(it) },
+                        onApplyStabilization = { engine.applyStabilization() },
                         onClose = { screen = Screen.Main; engine.syncConfig(context) },
                         onOpenOverlays = { screen = Screen.Overlays },
                     )
@@ -277,16 +279,15 @@ private fun StreamSurface(engine: StreamingEngine, onOpenSettings: () -> Unit) {
                 IconChip(
                     icon = Icons.Filled.Coffee,
                     description = if (isBrb) "End break" else "Break screen",
-                    onClick = { engine.toggleBrb(Prefs.brbText(context)) },
+                    onClick = { engine.toggleBrb() },
                     accent = if (isBrb) RoamLive else null,
                 )
-                if (streamActive) {
-                    IconChip(
-                        icon = Icons.Filled.VisibilityOff,
-                        description = "Stealth mode",
-                        onClick = { stealthActive = true },
-                    )
-                }
+                IconChip(
+                    icon = Icons.Filled.VisibilityOff,
+                    description = "Stealth mode",
+                    onClick = { stealthActive = true },
+                    enabled = streamActive,
+                )
             }
 
             if (chatEnabled && (kickChannel.isNotBlank() || twitchChannel.isNotBlank())) {
@@ -414,13 +415,17 @@ private fun IconChip(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     accent: Color? = null,
+    enabled: Boolean = true,
 ) {
     val bg = accent ?: Color.Black.copy(alpha = 0.55f)
     Surface(
         onClick = onClick,
+        enabled = enabled,
         shape = CircleShape,
         color = bg,
-        modifier = modifier.size(44.dp),
+        modifier = modifier
+            .size(44.dp)
+            .then(if (enabled) Modifier else Modifier.alpha(0.4f)),
     ) {
         Box(contentAlignment = Alignment.Center) {
             Icon(

@@ -27,6 +27,9 @@ object Prefs {
     private const val KEY_OVERLAY_SCENE_V1 = "overlay_scene_v1"
     private const val KEY_MIC_DEVICE_NAME = "mic_device_name"
     private const val KEY_MIC_DEVICE_TYPE = "mic_device_type"
+    private const val KEY_GPS_TOKEN_WARNING_SEEN = "gps_token_warning_seen"
+    private const val KEY_STABILIZATION_ENABLED = "stabilization_enabled"
+    private const val KEY_BRB_IMAGE_PATH = "brb_image_path"
 
     private const val DEFAULT_BRB_TEXT = "BE RIGHT BACK"
     private const val DEFAULT_STEALTH_PULSE_SEC = 30
@@ -145,18 +148,16 @@ object Prefs {
         sp(context).edit().putInt(KEY_MAX_RECONNECT_MIN, minutes).apply()
     }
 
-    /** The active overlay scene. Falls back to [defaultScene] (just the locked
-     *  watermark) on first install or if the saved JSON is corrupted.
+    /** The active overlay scene. Falls back to [defaultScene] (the Roam Live
+     *  watermark in the bottom-right corner) on first install or if the saved
+     *  JSON is corrupted.
      *
-     *  Locked items (the watermark) are force-healed to visible — they're
-     *  mandatory, and this self-corrects any scene saved with the watermark
-     *  hidden before locked items became un-uncheckable. */
+     *  The `locked` flag on an overlay now only means "can't be deleted" —
+     *  it no longer pins visibility or position. The Roam Live watermark uses
+     *  this so a user can hide or move it but not remove it entirely. */
     fun overlayScene(context: Context): Scene {
         val json = sp(context).getString(KEY_OVERLAY_SCENE_V1, null) ?: return defaultScene()
-        val scene = OverlayJson.fromJson(json) ?: return defaultScene()
-        return scene.copy(
-            items = scene.items.map { if (it.locked) it.copy(visible = true) else it },
-        )
+        return OverlayJson.fromJson(json) ?: return defaultScene()
     }
 
     fun setOverlayScene(context: Context, scene: Scene) {
@@ -182,6 +183,38 @@ object Prefs {
                 putString(KEY_MIC_DEVICE_NAME, productName)
                 putInt(KEY_MIC_DEVICE_TYPE, type)
             }
+        }.apply()
+    }
+
+    /** Has the user seen the one-time "this uses GPS, costs battery + heat"
+     *  dialog before saving an overlay scene with a GPS-backed live token? */
+    fun gpsTokenWarningSeen(context: Context): Boolean =
+        sp(context).getBoolean(KEY_GPS_TOKEN_WARNING_SEEN, false)
+
+    fun setGpsTokenWarningSeen(context: Context, seen: Boolean) {
+        sp(context).edit().putBoolean(KEY_GPS_TOKEN_WARNING_SEEN, seen).apply()
+    }
+
+    /** Image stabilization (EIS + OIS where available) toggle. Off by default —
+     *  it slightly crops the frame and existing users on upgrade shouldn't get
+     *  a surprise viewport change. */
+    fun stabilizationEnabled(context: Context): Boolean =
+        sp(context).getBoolean(KEY_STABILIZATION_ENABLED, false)
+
+    fun setStabilizationEnabled(context: Context, enabled: Boolean) {
+        sp(context).edit().putBoolean(KEY_STABILIZATION_ENABLED, enabled).apply()
+    }
+
+    /** Optional custom image shown full-frame on the break screen instead of the
+     *  default text-on-black. Stored as an absolute path in app-private storage
+     *  (`OverlayImageStore`). Null means "use the text". */
+    fun brbImagePath(context: Context): String? =
+        sp(context).getString(KEY_BRB_IMAGE_PATH, null)?.takeIf { it.isNotBlank() }
+
+    fun setBrbImagePath(context: Context, path: String?) {
+        sp(context).edit().apply {
+            if (path.isNullOrBlank()) remove(KEY_BRB_IMAGE_PATH)
+            else putString(KEY_BRB_IMAGE_PATH, path)
         }.apply()
     }
 }

@@ -40,6 +40,10 @@ private const val TAG = "RoamOverlayRenderer"
 class OverlayRenderer(
     private val context: Context,
     private val stream: GenericStream,
+    private val tokenSource: TokenSource,
+    /** Builds the current [TokenSnapshot] on demand — used by every text-token
+     *  resolution so values are always fresh. The engine provides this. */
+    private val snapshotProvider: () -> TokenSnapshot,
 ) {
     private val activeFilters = LinkedHashMap<String, BaseFilterRender>()
     private val webOverlays = LinkedHashMap<String, WebOverlayController>()
@@ -78,6 +82,15 @@ class OverlayRenderer(
                 }
             }
         if (liveText.isNotEmpty()) startLiveTextTicking()
+        // Decide whether the active scene needs compass / GPS data. TokenSource
+        // starts or stops the corresponding subscription so users with no
+        // compass / GPS overlays never pay the sensor or location cost.
+        val visibleTextItems = scene.items
+            .filter { it.visible }
+            .mapNotNull { (it.source as? OverlaySource.Text)?.text }
+        val needsCompass = visibleTextItems.any { OverlayTokens.hasCompassToken(it) }
+        val needsGps = visibleTextItems.any { OverlayTokens.hasGpsToken(it) }
+        tokenSource.activate(needsCompass, needsGps)
     }
 
     fun clear() {
@@ -142,7 +155,11 @@ class OverlayRenderer(
         source: OverlaySource.Text,
     ) {
         runCatching {
-            filter.setText(OverlayTokens.resolve(source.text), source.fontSizeSp, source.colorArgb)
+            filter.setText(
+                OverlayTokens.resolve(source.text, snapshotProvider()),
+                source.fontSizeSp,
+                source.colorArgb,
+            )
             filter.setDefaultScale(Prefs.videoWidth(context), Prefs.videoHeight(context))
             applyPrecisePosition(filter, item.xPercent, item.yPercent)
         }.onFailure { Log.w(TAG, "text filter config failed", it) }
@@ -238,8 +255,9 @@ class OverlayRenderer(
     }
 
     private fun refreshLiveText() {
+        val snap = snapshotProvider()
         liveText.values.forEach { live ->
-            val resolved = OverlayTokens.resolve(live.source.text)
+            val resolved = OverlayTokens.resolve(live.source.text, snap)
             if (resolved != live.lastRendered) {
                 // Same config path as the initial setup, so a refreshed overlay
                 // lands in exactly the same place as a never-refreshed one.

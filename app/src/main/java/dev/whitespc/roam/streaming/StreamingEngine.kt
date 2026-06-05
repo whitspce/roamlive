@@ -10,7 +10,10 @@ import android.view.MotionEvent
 import com.pedro.common.AudioCodec
 import com.pedro.common.ConnectChecker
 import com.pedro.common.VideoCodec
+import android.graphics.BitmapFactory
+import com.pedro.encoder.input.gl.render.filters.BaseFilterRender
 import com.pedro.encoder.input.gl.render.filters.BlackFilterRender
+import com.pedro.encoder.input.gl.render.filters.`object`.ImageObjectFilterRender
 import com.pedro.encoder.input.gl.render.filters.`object`.TextObjectFilterRender
 import com.pedro.encoder.input.sources.audio.MicrophoneSource
 import com.pedro.encoder.input.sources.video.Camera2Source
@@ -171,13 +174,33 @@ class StreamingEngine(private val context: Context) {
     private var blackFilter: BlackFilterRender? = null
 
     private var brbBlackFilter: BlackFilterRender? = null
-    private var brbTextFilter: TextObjectFilterRender? = null
+    /** Foreground filter shown over the BRB black layer — either text or a custom
+     *  full-frame image, depending on whether the user set a BRB image in Settings. */
+    private var brbForegroundFilter: BaseFilterRender? = null
     private var muteBeforeBrb = false
 
     private val dualCamera = DualCameraController(context, stream)
     val isDualCamOn: StateFlow<Boolean> = dualCamera.isOn
 
-    private val overlayRenderer = OverlayRenderer(context, stream)
+    private val tokenSource = dev.whitespc.roam.streaming.overlay.TokenSource(context)
+
+    /** Wall-clock millis at which the current go-live attempt entered the
+     *  streamActive window. Set in [start]; preserved across reconnects so the
+     *  `{stream_time}` token counts continuously; cleared on a real stop. Null
+     *  means "not streaming." */
+    private var liveStartMs: Long? = null
+
+    private val overlayRenderer = OverlayRenderer(
+        context = context,
+        stream = stream,
+        tokenSource = tokenSource,
+        snapshotProvider = {
+            tokenSource.snapshot(_state.value, currentStreamUptimeSec())
+        },
+    )
+
+    private fun currentStreamUptimeSec(): Int? =
+        liveStartMs?.let { ((System.currentTimeMillis() - it) / 1000L).toInt() }
     /** Tracks which way the main camera (the encoder's video source) is currently
      *  facing. Camera2Source defaults to BACK, so we start at false (back). Flipped
      *  whenever switchCamera runs. Needed so we can enable PiP with the OPPOSITE
@@ -253,6 +276,7 @@ class StreamingEngine(private val context: Context) {
         }
         if (stream.isOnPreview) stream.stopPreview()
         stream.startPreview(view)
+        applyStabilization()
         // Re-apply the overlay scene on every attach (not just the first one).
         // When the app is backgrounded without being killed, the OpenGL surface
         // gets torn down and the existing filters lose their GPU textures —
@@ -261,7 +285,13 @@ class StreamingEngine(private val context: Context) {
         // It does mean a web overlay reloads when you return from background.
         // BRB / camera-off / dual-cam PiP are separate mode-based filters
         // managed elsewhere; not part of the scene.
-        overlayRenderer.applyScene(Prefs.overlayScene(context))
+        //
+        // Skipped while BRB is active so we don't re-stamp the watermark and
+        // overlays on top of the streamer's BRB screen. They'll be restored
+        // when the user exits BRB.
+        if (!_isBrb.value) {
+            overlayRenderer.applyScene(Prefs.overlayScene(context))
+        }
     }
 
     fun detachPreview() {
@@ -329,8 +359,13 @@ class StreamingEngine(private val context: Context) {
 
     /** Re-apply the saved overlay scene to the live pipeline. Called when returning
      *  from the overlay editor, since the engine is no longer recreated on the way
-     *  back. Safe whether idle or streaming (the renderer swaps filters live). */
+     *  back. Safe whether idle or streaming (the renderer swaps filters live).
+     *
+     *  No-op while BRB is active — overlays are deliberately hidden during BRB,
+     *  and toggleBrb will re-apply the scene (picking up any editor changes)
+     *  when the user exits. */
     fun applyScene(context: Context) {
+        if (_isBrb.value) return
         runCatching { overlayRenderer.applyScene(Prefs.overlayScene(context)) }
             .onFailure { Log.w(TAG, "applyScene failed", it) }
     }
@@ -368,6 +403,7 @@ class StreamingEngine(private val context: Context) {
         wantStreaming = true
         hasEverConnected = false
         lastStreamUrl = cleanUrl
+        liveStartMs = System.currentTimeMillis()
         _state.value = StreamState.Connecting
         runCatching { stream.startStream(cleanUrl) }
             .onFailure { t ->
@@ -383,6 +419,7 @@ class StreamingEngine(private val context: Context) {
         reconnectJob?.cancel()
         reconnectJob = null
         isReconnecting = false
+        liveStartMs = null
         runCatching { if (stream.isStreaming) stream.stopStream() }
         _state.value = StreamState.Idle
     }
@@ -396,8 +433,10 @@ class StreamingEngine(private val context: Context) {
         reconnectJob?.cancel()
         reconnectJob = null
         isReconnecting = false
+        liveStartMs = null
         dualCamera.release()
         overlayRenderer.clear()
+        tokenSource.release()
         runCatching { if (stream.isStreaming) stream.stopStream() }
         if (stream.isOnPreview) stream.stopPreview()
         engineScope.cancel()
@@ -407,6 +446,7 @@ class StreamingEngine(private val context: Context) {
         if (_state.value is StreamState.Error) {
             stopRequested = true
             wantStreaming = false
+            liveStartMs = null
             runCatching { if (stream.isStreaming) stream.stopStream() }
             _state.value = StreamState.Idle
         }
@@ -416,6 +456,7 @@ class StreamingEngine(private val context: Context) {
         if (_state.value === StreamState.Connecting) {
             stopRequested = true
             wantStreaming = false
+            liveStartMs = null
             runCatching { if (stream.isStreaming) stream.stopStream() }
             _state.value = StreamState.Error(
                 "Connection timed out. Check your stream URL and network.",
@@ -539,6 +580,28 @@ class StreamingEngine(private val context: Context) {
         // dies with the closed session, or our setTorchMode is killed when the new
         // session opens). Reset the icon to match.
         _isTorchOn.value = false
+        // The new camera session starts in its default state — re-apply
+        // stabilization if the user has it enabled.
+        applyStabilization()
+    }
+
+    /** Apply the user's image-stabilization preference to the current main
+     *  camera. Combines optical (OIS — hardware, where the phone has it) with
+     *  electronic (EIS — digital, available almost everywhere). No-op on
+     *  devices that support neither. Slightly crops the frame when EIS engages,
+     *  which is why this is opt-in. Safe to call live; safe to call repeatedly. */
+    fun applyStabilization() {
+        val enabled = Prefs.stabilizationEnabled(context)
+        val cam = stream.videoSource as? Camera2Source ?: return
+        runCatching {
+            if (enabled) {
+                cam.enableVideoStabilization()
+                cam.enableOpticalVideoStabilization()
+            } else {
+                cam.disableVideoStabilization()
+                cam.disableOpticalVideoStabilization()
+            }
+        }.onFailure { Log.w(TAG, "stabilization apply failed", it) }
     }
 
     fun toggleDualCam() {
@@ -647,15 +710,18 @@ class StreamingEngine(private val context: Context) {
         _thermalNotice.value = null
     }
 
-    fun toggleBrb(brbText: String) {
+    fun toggleBrb() {
         val gl = stream.getGlInterface()
         val mic = stream.audioSource as? MicrophoneSource
         if (_isBrb.value) {
             runCatching {
-                brbTextFilter?.let { gl.removeFilter(it) }
+                brbForegroundFilter?.let { gl.removeFilter(it) }
                 brbBlackFilter?.let { gl.removeFilter(it) }
-                brbTextFilter = null
+                brbForegroundFilter = null
                 brbBlackFilter = null
+                // Restore the overlay scene now that BRB is dismissed — picks
+                // up any edits the user made via the editor during BRB.
+                overlayRenderer.applyScene(Prefs.overlayScene(context))
                 dualCamera.setPipVisible(true)
                 if (!muteBeforeBrb && _isMuted.value) {
                     mic?.unMute()
@@ -666,23 +732,21 @@ class StreamingEngine(private val context: Context) {
                 .onFailure { Log.w(TAG, "brb-off failed", it) }
         } else {
             runCatching {
+                // Take down the overlay scene so the streamer's BRB screen is
+                // clean — no watermark or other overlays stamped over the
+                // image / text they chose as their takeover.
+                overlayRenderer.clear()
                 val black = BlackFilterRender()
-                val text = TextObjectFilterRender().apply {
-                    setText(
-                        brbText.ifBlank { "BE RIGHT BACK" },
-                        28f,
-                        AndroidColor.WHITE,
-                    )
-                    setDefaultScale(
-                        Prefs.videoWidth(context),
-                        Prefs.videoHeight(context),
-                    )
-                    setPosition(TranslateTo.CENTER)
-                }
+                // Custom image (if the user set one in Settings) takes priority
+                // over the text. If image decode fails, fall back to the text.
+                val foreground: BaseFilterRender =
+                    Prefs.brbImagePath(context)
+                        ?.let { createBrbImageFilter(it) }
+                        ?: createBrbTextFilter(Prefs.brbText(context))
                 gl.addFilter(0, black)
-                gl.addFilter(1, text)
+                gl.addFilter(1, foreground)
                 brbBlackFilter = black
-                brbTextFilter = text
+                brbForegroundFilter = foreground
                 // PiP filter has a higher index in the GL chain, so it draws on
                 // top of our BRB black. Hide it explicitly so the streamer's whole
                 // broadcast goes to the BRB screen, not just the main camera area.
@@ -697,6 +761,41 @@ class StreamingEngine(private val context: Context) {
                 .onFailure { Log.w(TAG, "brb-on failed", it) }
         }
     }
+
+    /** Fit-not-fill the user's custom BRB image into the frame: the whole image
+     *  is visible (no cropping), centred, with the black filter behind it showing
+     *  through wherever the aspect ratios don't match. Returns null if the file
+     *  can't be decoded — toggleBrb falls back to the text in that case. */
+    private fun createBrbImageFilter(path: String): ImageObjectFilterRender? {
+        val bitmap = BitmapFactory.decodeFile(path) ?: return null
+        val frameW = Prefs.videoWidth(context).toFloat()
+        val frameH = Prefs.videoHeight(context).coerceAtLeast(1).toFloat()
+        val frameAspect = frameW / frameH
+        val imgAspect = bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1).toFloat()
+        val scaleX: Float
+        val scaleY: Float
+        if (imgAspect > frameAspect) {
+            // Image is wider than the frame — fit width, letterbox top/bottom.
+            scaleX = 100f
+            scaleY = 100f * frameAspect / imgAspect
+        } else {
+            // Image is taller (or same) — fit height, pillarbox left/right.
+            scaleX = 100f * imgAspect / frameAspect
+            scaleY = 100f
+        }
+        return ImageObjectFilterRender().apply {
+            setImage(bitmap)
+            setScale(scaleX, scaleY)
+            setPosition((100f - scaleX) / 2f, (100f - scaleY) / 2f)
+        }
+    }
+
+    private fun createBrbTextFilter(brbText: String): TextObjectFilterRender =
+        TextObjectFilterRender().apply {
+            setText(brbText.ifBlank { "BE RIGHT BACK" }, 28f, AndroidColor.WHITE)
+            setDefaultScale(Prefs.videoWidth(context), Prefs.videoHeight(context))
+            setPosition(TranslateTo.CENTER)
+        }
 
     private fun handleThermalChange(status: Int) {
         if (!stream.isStreaming) return

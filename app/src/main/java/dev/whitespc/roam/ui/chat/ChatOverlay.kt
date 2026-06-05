@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -93,27 +94,23 @@ private fun ChatRow(message: ChatMessage) {
             append(message.text)
         }
     }
-    androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.Top) {
-        PlatformDot(color = Color(message.platform.brandColor))
-        androidx.compose.foundation.layout.Spacer(modifier = Modifier.size(6.dp))
+    // Faint platform-brand tint behind the row — Kick green, Twitch purple,
+    // YouTube red — so the source platform reads instantly while you're scanning
+    // chat at a glance. Replaces the older left-side dot.
+    androidx.compose.foundation.layout.Row(
+        verticalAlignment = Alignment.Top,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(4.dp))
+            .background(Color(message.platform.brandColor).copy(alpha = 0.10f))
+            .padding(horizontal = 6.dp, vertical = 3.dp),
+    ) {
         Text(
             text = text,
             fontSize = 13.sp,
             lineHeight = 16.sp,
-            modifier = Modifier.padding(top = 2.dp),
         )
     }
-}
-
-@Composable
-private fun PlatformDot(color: Color) {
-    Box(
-        modifier = Modifier
-            .padding(top = 6.dp)
-            .size(6.dp)
-            .clip(CircleShape)
-            .background(color),
-    )
 }
 
 @Suppress("unused")

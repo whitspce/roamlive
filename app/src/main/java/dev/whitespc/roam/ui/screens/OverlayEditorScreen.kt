@@ -1,9 +1,11 @@
 package dev.whitespc.roam.ui.screens
 
+import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -121,6 +123,7 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
     var draft by remember { mutableStateOf(Prefs.overlayScene(context)) }
     var selectedId by remember { mutableStateOf<String?>(null) }
     var showWebWarning by remember { mutableStateOf(false) }
+    var showGpsWarning by remember { mutableStateOf(false) }
     val selected = draft.items.firstOrNull { it.id == selectedId }
 
     val frameAspect = remember {
@@ -175,6 +178,52 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
         }
     }
 
+    // Permission launcher used when a save touches a GPS-backed token and the
+    // location permission isn't granted yet. We save and close regardless of the
+    // user's decision; if they deny, GPS tokens just render as "—" until they
+    // grant later. Granting also lets TokenSource activate GPS on the next
+    // applyScene (which fires when the editor closes).
+    val locationPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { _ ->
+        Prefs.setOverlayScene(context, draft)
+        onClose()
+    }
+
+    fun sceneNeedsGps(): Boolean = draft.items.any { item ->
+        item.visible &&
+            (item.source as? OverlaySource.Text)?.text
+                ?.let { OverlayTokens.hasGpsToken(it) } == true
+    }
+
+    fun saveAndClose() {
+        Prefs.setOverlayScene(context, draft)
+        onClose()
+    }
+
+    fun handleSave() {
+        if (!sceneNeedsGps()) {
+            saveAndClose()
+            return
+        }
+        val hasPerm = ContextCompat.checkSelfPermission(
+            context,
+            android.Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (hasPerm) {
+            saveAndClose()
+            return
+        }
+        if (Prefs.gpsTokenWarningSeen(context)) {
+            // Already informed; jump straight to the system prompt.
+            locationPermLauncher.launch(android.Manifest.permission.ACCESS_FINE_LOCATION)
+        } else {
+            // First-time cost dialog before the permission prompt — the FAQ
+            // does the long form; this is the in-app heads-up moment.
+            showGpsWarning = true
+        }
+    }
+
     // Adds a blank-URL web overlay (full-frame) and selects it for editing.
     fun addWebOverlay() {
         val item = OverlayItem(
@@ -198,10 +247,7 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
     ) {
         EditorTopBar(
             onCancel = onClose,
-            onSave = {
-                Prefs.setOverlayScene(context, draft)
-                onClose()
-            },
+            onSave = { handleSave() },
         )
         Row(modifier = Modifier.fillMaxSize()) {
             Box(
@@ -253,7 +299,7 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
                         showWebWarning = true
                     },
                 )
-                if (selected != null && !selected.locked) {
+                if (selected != null) {
                     SelectedItemControls(
                         item = selected,
                         frameAspect = frameAspect,
@@ -270,12 +316,6 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
                             selectedId = null
                         },
                     )
-                } else if (selected != null && selected.locked) {
-                    Text(
-                        text = "The watermark is locked and can't be edited.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 13.sp,
-                    )
                 }
             }
         }
@@ -289,6 +329,25 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
                 onDismiss = { showWebWarning = false },
             )
         }
+
+        if (showGpsWarning) {
+            GpsTokenWarningDialog(
+                onConfirm = {
+                    showGpsWarning = false
+                    Prefs.setGpsTokenWarningSeen(context, true)
+                    locationPermLauncher.launch(
+                        android.Manifest.permission.ACCESS_FINE_LOCATION,
+                    )
+                },
+                onDismiss = {
+                    // Backed out of the GPS cost — save without permission so
+                    // the user doesn't lose their edits; GPS tokens will render
+                    // as "—" until they grant the permission later.
+                    showGpsWarning = false
+                    saveAndClose()
+                },
+            )
+        }
     }
 }
 
@@ -296,22 +355,21 @@ private fun Scene.mapItem(id: String, transform: (OverlayItem) -> OverlayItem): 
     copy(items = items.map { if (it.id == id) transform(it) else it })
 
 private fun nextZOrder(scene: Scene): Int {
-    val nonWatermarkMax = scene.items
-        .filter { it.source != OverlaySource.Watermark }
-        .maxOfOrNull { it.zOrder } ?: 0
-    return (nonWatermarkMax + 1).coerceAtMost(999)
+    val max = scene.items.maxOfOrNull { it.zOrder } ?: 0
+    // Cap to keep new items just under the watermark's default z (1000) so the
+    // brand mark stays on top out of the box. Users can still move it down
+    // manually with the layer arrows if they want.
+    return (max + 1).coerceAtMost(999)
 }
 
 /**
  * Swap an item's z-order with its neighbour, moving it [up] (toward the top
- * layer) or down. Only non-watermark items reorder — the watermark stays
- * pinned above everything. Returns the scene unchanged if the move isn't valid.
+ * layer) or down. Every item is reorderable now, including the watermark.
+ * Returns the scene unchanged if the move isn't valid.
  */
 private fun Scene.moveItem(id: String, up: Boolean): Scene {
     // List is shown top-layer-first, so "up" means a higher zOrder.
-    val ordered = items
-        .filter { it.source != OverlaySource.Watermark }
-        .sortedByDescending { it.zOrder }
+    val ordered = items.sortedByDescending { it.zOrder }
     val idx = ordered.indexOfFirst { it.id == id }
     if (idx < 0) return this
     val swapIdx = if (up) idx - 1 else idx + 1
@@ -566,8 +624,8 @@ private fun OverlayList(
     onAddWeb: () -> Unit,
 ) {
     val rows = scene.items.sortedByDescending { it.zOrder }
-    // Reorderable subset, in the same top-first order as the visible list.
-    val reorderable = rows.filter { it.source != OverlaySource.Watermark }
+    // Every item is reorderable now (the locked flag only prevents deletion).
+    val reorderable = rows
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         SectionLabel("Overlays")
         rows.forEach { item ->
@@ -589,8 +647,7 @@ private fun OverlayList(
             ) {
                 Checkbox(
                     checked = item.visible,
-                    onCheckedChange = if (item.locked) null else { _ -> onToggleVisible(item.id) },
-                    enabled = !item.locked,
+                    onCheckedChange = { _ -> onToggleVisible(item.id) },
                     colors = CheckboxDefaults.colors(checkedColor = RoamLive),
                 )
                 Text(
@@ -601,27 +658,18 @@ private fun OverlayList(
                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
-                if (item.locked) {
-                    Icon(
-                        imageVector = Icons.Filled.Lock,
-                        contentDescription = "Locked",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp),
-                    )
-                } else {
-                    ReorderArrow(
-                        icon = Icons.Filled.KeyboardArrowUp,
-                        description = "Move up a layer",
-                        enabled = reorderIdx > 0,
-                        onClick = { onMove(item.id, true) },
-                    )
-                    ReorderArrow(
-                        icon = Icons.Filled.KeyboardArrowDown,
-                        description = "Move down a layer",
-                        enabled = reorderIdx < reorderable.lastIndex,
-                        onClick = { onMove(item.id, false) },
-                    )
-                }
+                ReorderArrow(
+                    icon = Icons.Filled.KeyboardArrowUp,
+                    description = "Move up a layer",
+                    enabled = reorderIdx > 0,
+                    onClick = { onMove(item.id, true) },
+                )
+                ReorderArrow(
+                    icon = Icons.Filled.KeyboardArrowDown,
+                    description = "Move down a layer",
+                    enabled = reorderIdx < reorderable.lastIndex,
+                    onClick = { onMove(item.id, false) },
+                )
             }
         }
         Spacer(modifier = Modifier.height(8.dp))
@@ -918,25 +966,29 @@ private fun SelectedItemControls(
             )
         }
 
-        Spacer(modifier = Modifier.height(4.dp))
-        Surface(
-            onClick = onDelete,
-            shape = RoundedCornerShape(8.dp),
-            color = Color.Transparent,
-            border = androidx.compose.foundation.BorderStroke(1.dp, RoamLive),
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(vertical = 10.dp, horizontal = 12.dp),
+        // Locked items can't be deleted (e.g. the Roam Live watermark — you can
+        // hide it, move it, rename it, but not remove it).
+        if (!item.locked) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Surface(
+                onClick = onDelete,
+                shape = RoundedCornerShape(8.dp),
+                color = Color.Transparent,
+                border = androidx.compose.foundation.BorderStroke(1.dp, RoamLive),
             ) {
-                Icon(
-                    imageVector = Icons.Filled.Delete,
-                    contentDescription = null,
-                    tint = RoamLive,
-                    modifier = Modifier.size(18.dp),
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(text = "Delete overlay", color = RoamLive, fontSize = 14.sp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(vertical = 10.dp, horizontal = 12.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Delete,
+                        contentDescription = null,
+                        tint = RoamLive,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(text = "Delete overlay", color = RoamLive, fontSize = 14.sp)
+                }
             }
         }
     }
@@ -1065,6 +1117,37 @@ private fun SectionLabel(text: String) {
         fontSize = 13.sp,
         fontWeight = FontWeight.Bold,
         letterSpacing = 1.6.sp,
+    )
+}
+
+/** One-time heads-up before the location permission prompt fires, shown when a
+ *  scene about to be saved uses a GPS-backed token. Cost note here; the long
+ *  form lives in the website FAQ. After this, the user gets the standard
+ *  Android permission prompt. */
+@Composable
+private fun GpsTokenWarningDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("This overlay uses GPS") },
+        text = {
+            Text(
+                "One of your overlays uses a GPS-backed value (speed, " +
+                    "altitude, location, or city). GPS needs the location " +
+                    "permission and adds real battery and heat cost while " +
+                    "you're streaming.\n\n" +
+                    "The next prompt is Android asking you to allow location. " +
+                    "\"While using the app\" is enough; Roam never uses " +
+                    "location in the background.\n\n" +
+                    "Skip to save without GPS (the tokens will show \"—\" " +
+                    "until you grant the permission).",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("Continue") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Skip") }
+        },
     )
 }
 
