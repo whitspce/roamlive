@@ -9,6 +9,9 @@ object Prefs {
     private const val FILE = "roam_prefs"
 
     private const val KEY_STREAM_URL = "stream_url"
+    /** Keystore-encrypted stream URL. Plaintext [KEY_STREAM_URL] migrates here
+     *  on first read and is removed; see [SecretStore] for the why. */
+    private const val KEY_STREAM_URL_ENC = "stream_url_enc"
     // Legacy split-field keys, kept for one-time migration into the single URL.
     private const val KEY_SERVER_URL = "server_url"
     private const val KEY_STREAM_KEY = "stream_key"
@@ -46,23 +49,48 @@ object Prefs {
     private fun sp(context: Context) =
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
-    /** Full RTMP/RTMPS URL for destination 1, key included. Auto-migrates from the
-     *  legacy split server/key fields on first read if the single URL is blank. */
+    /** Full RTMP/SRT URL for the destination, stream key included, stored
+     *  encrypted (the key is a credential: anyone holding it can stream as you).
+     *  Reads migrate older plaintext storage on the fly: first the plaintext
+     *  single-URL key, then the original split server/key fields. */
     fun streamUrl(context: Context): String {
-        val direct = sp(context).getString(KEY_STREAM_URL, "") ?: ""
-        if (direct.isNotBlank()) return direct
+        val encrypted = sp(context).getString(KEY_STREAM_URL_ENC, null)
+        if (encrypted != null) {
+            SecretStore.decrypt(encrypted)?.let { return it }
+            // Undecryptable (keystore was reset): drop it so the user gets a
+            // clean empty field instead of a permanently broken one.
+            sp(context).edit().remove(KEY_STREAM_URL_ENC).apply()
+        }
+        val plaintext = sp(context).getString(KEY_STREAM_URL, "") ?: ""
+        if (plaintext.isNotBlank()) {
+            setStreamUrl(context, plaintext)
+            return plaintext
+        }
         val server = (sp(context).getString(KEY_SERVER_URL, "") ?: "").trim().trimEnd('/')
         val key = (sp(context).getString(KEY_STREAM_KEY, "") ?: "").trim()
         if (server.isNotBlank() && key.isNotBlank()) {
             val combined = "$server/$key"
-            sp(context).edit().putString(KEY_STREAM_URL, combined).apply()
+            setStreamUrl(context, combined)
             return combined
         }
         return ""
     }
 
     fun setStreamUrl(context: Context, url: String) {
-        sp(context).edit().putString(KEY_STREAM_URL, url).apply()
+        val encrypted = SecretStore.encrypt(url)
+        sp(context).edit().apply {
+            if (encrypted != null) {
+                putString(KEY_STREAM_URL_ENC, encrypted)
+                // Remove every plaintext copy once the encrypted one exists.
+                remove(KEY_STREAM_URL)
+                remove(KEY_SERVER_URL)
+                remove(KEY_STREAM_KEY)
+            } else {
+                // Keystore refused (rare, broken devices): plaintext beats
+                // silently losing the user's URL.
+                putString(KEY_STREAM_URL, url)
+            }
+        }.apply()
     }
 
     fun videoWidth(context: Context): Int =
