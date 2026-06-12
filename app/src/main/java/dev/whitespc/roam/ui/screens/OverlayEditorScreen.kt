@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -33,6 +35,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -116,7 +119,10 @@ private const val IMAGE_SIZE_MIN = 5f
 private const val IMAGE_SIZE_MAX = 150f
 
 @Composable
-fun OverlayEditorScreen(onClose: () -> Unit) {
+fun OverlayEditorScreen(
+    onClose: () -> Unit,
+    onApplyScene: () -> Unit,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -124,6 +130,16 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
     var selectedId by remember { mutableStateOf<String?>(null) }
     var showWebWarning by remember { mutableStateOf(false) }
     var showGpsWarning by remember { mutableStateOf(false) }
+    // Brief "Saved" feedback on the save button so save-and-stay is visibly
+    // confirmed — without it, hitting Save with no close looks like nothing
+    // happened.
+    var justSaved by remember { mutableStateOf(false) }
+    LaunchedEffect(justSaved) {
+        if (justSaved) {
+            delay(1500)
+            justSaved = false
+        }
+    }
     val selected = draft.items.firstOrNull { it.id == selectedId }
 
     val frameAspect = remember {
@@ -183,11 +199,14 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
     // user's decision; if they deny, GPS tokens just render as "—" until they
     // grant later. Granting also lets TokenSource activate GPS on the next
     // applyScene (which fires when the editor closes).
-    val locationPermLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { _ ->
+    // Persist the draft, push the new scene to the live engine so the broadcast
+    // updates immediately, and flash the "Saved" feedback. Stays in the editor
+    // so the user can keep adding overlays without re-entering each time. The
+    // back arrow is what closes.
+    fun saveAndStay() {
         Prefs.setOverlayScene(context, draft)
-        onClose()
+        onApplyScene()
+        justSaved = true
     }
 
     fun sceneNeedsGps(): Boolean = draft.items.any { item ->
@@ -196,14 +215,15 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
                 ?.let { OverlayTokens.hasGpsToken(it) } == true
     }
 
-    fun saveAndClose() {
-        Prefs.setOverlayScene(context, draft)
-        onClose()
+    val locationPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { _ ->
+        saveAndStay()
     }
 
     fun handleSave() {
         if (!sceneNeedsGps()) {
-            saveAndClose()
+            saveAndStay()
             return
         }
         val hasPerm = ContextCompat.checkSelfPermission(
@@ -211,7 +231,7 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
             android.Manifest.permission.ACCESS_FINE_LOCATION,
         ) == PackageManager.PERMISSION_GRANTED
         if (hasPerm) {
-            saveAndClose()
+            saveAndStay()
             return
         }
         if (Prefs.gpsTokenWarningSeen(context)) {
@@ -248,6 +268,7 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
         EditorTopBar(
             onCancel = onClose,
             onSave = { handleSave() },
+            justSaved = justSaved,
         )
         Row(modifier = Modifier.fillMaxSize()) {
             Box(
@@ -344,7 +365,7 @@ fun OverlayEditorScreen(onClose: () -> Unit) {
                     // the user doesn't lose their edits; GPS tokens will render
                     // as "—" until they grant the permission later.
                     showGpsWarning = false
-                    saveAndClose()
+                    saveAndStay()
                 },
             )
         }
@@ -388,7 +409,11 @@ private fun Scene.moveItem(id: String, up: Boolean): Scene {
 }
 
 @Composable
-private fun EditorTopBar(onCancel: () -> Unit, onSave: () -> Unit) {
+private fun EditorTopBar(
+    onCancel: () -> Unit,
+    onSave: () -> Unit,
+    justSaved: Boolean,
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
@@ -398,7 +423,7 @@ private fun EditorTopBar(onCancel: () -> Unit, onSave: () -> Unit) {
         IconButton(onClick = onCancel, modifier = Modifier.size(48.dp)) {
             Icon(
                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = "Cancel",
+                contentDescription = "Close",
                 tint = MaterialTheme.colorScheme.onBackground,
             )
         }
@@ -415,13 +440,26 @@ private fun EditorTopBar(onCancel: () -> Unit, onSave: () -> Unit) {
             shape = RoundedCornerShape(8.dp),
             color = MaterialTheme.colorScheme.primary,
         ) {
-            Text(
-                text = "Save",
-                color = MaterialTheme.colorScheme.onPrimary,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            )
+            ) {
+                if (justSaved) {
+                    Icon(
+                        imageVector = Icons.Filled.Check,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+                Text(
+                    text = if (justSaved) "Saved" else "Save",
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
         }
     }
 }
@@ -1020,8 +1058,12 @@ private fun LabeledSlider(
     }
 }
 
-/** Chips that append a live token ({time}/{date}) to the text. The token shows
- *  as literal text in the field; the canvas and broadcast resolve it live. */
+/** Chips that append a live token ({time}/{date}/...) to the text. The token
+ *  shows as literal text in the field; the canvas and broadcast resolve it
+ *  live. FlowRow so the row wraps to a second line instead of squishing the
+ *  rightmost chip into a single-character column when there are more chips
+ *  than fit. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TokenChips(onInsert: (String) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1031,7 +1073,10 @@ private fun TokenChips(onInsert: (String) -> Unit) {
             fontSize = 13.sp,
             fontWeight = FontWeight.Medium,
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             OverlayTokens.tokens.forEach { (token, label) ->
                 Surface(
                     onClick = { onInsert(token) },

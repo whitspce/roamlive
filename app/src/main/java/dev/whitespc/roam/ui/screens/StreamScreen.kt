@@ -43,6 +43,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -69,6 +70,7 @@ import kotlinx.coroutines.launch
 import dev.whitespc.roam.chat.ChatManager
 import dev.whitespc.roam.storage.Prefs
 import dev.whitespc.roam.streaming.DualCameraSupport
+import dev.whitespc.roam.streaming.LinkHealth
 import dev.whitespc.roam.streaming.StreamState
 import dev.whitespc.roam.streaming.StreamingEngine
 import dev.whitespc.roam.streaming.StreamingService
@@ -89,6 +91,14 @@ private enum class Screen { Main, Settings, Overlays }
 fun StreamScreen(modifier: Modifier = Modifier) {
     var screen by rememberSaveable { mutableStateOf(Screen.Main) }
     val context = LocalContext.current
+    // Bumped every time a settings-layer screen closes. StreamSurface is never
+    // unmounted (Settings/Overlays draw on top of it), so its remember{} prefs
+    // reads would otherwise be captured once per process and go stale: chat
+    // panel toggles wouldn't show until restart, and the Go Live button could
+    // sit dark for minutes after the first URL save (it only re-evaluated when
+    // an unrelated recomposition happened to come along). Keying the reads on
+    // this revision refreshes them at the moment settings can have changed.
+    var configRevision by remember { mutableIntStateOf(0) }
 
     Box(
         modifier = modifier
@@ -109,24 +119,47 @@ fun StreamScreen(modifier: Modifier = Modifier) {
                 onDispose { engine.release() }
             }
 
-            StreamSurface(engine = engine, onOpenSettings = { screen = Screen.Settings })
+            StreamSurface(
+                engine = engine,
+                configRevision = configRevision,
+                onOpenSettings = { screen = Screen.Settings },
+            )
 
             when (screen) {
                 Screen.Main -> Unit
                 Screen.Settings -> {
-                    BackHandler { screen = Screen.Main; engine.syncConfig(context) }
+                    BackHandler {
+                        screen = Screen.Main
+                        engine.syncConfig(context)
+                        configRevision++
+                    }
                     SettingsScreen(
                         isLive = isLive,
                         onApplyLiveBitrate = { engine.setBitrate(it) },
+                        onApplyAutoBitrate = { engine.setAutoBitrate(it) },
+                        onApplyRecording = { engine.setRecordWhileStreaming(it) },
                         onApplyStabilization = { engine.applyStabilization() },
-                        onClose = { screen = Screen.Main; engine.syncConfig(context) },
+                        onClose = {
+                            screen = Screen.Main
+                            engine.syncConfig(context)
+                            configRevision++
+                        },
                         onOpenOverlays = { screen = Screen.Overlays },
                     )
                 }
                 Screen.Overlays -> {
-                    BackHandler { screen = Screen.Settings; engine.applyScene(context) }
+                    BackHandler {
+                        screen = Screen.Settings
+                        engine.applyScene(context)
+                        configRevision++
+                    }
                     OverlayEditorScreen(
-                        onClose = { screen = Screen.Settings; engine.applyScene(context) },
+                        onClose = {
+                            screen = Screen.Settings
+                            engine.applyScene(context)
+                            configRevision++
+                        },
+                        onApplyScene = { engine.applyScene(context) },
                     )
                 }
             }
@@ -135,12 +168,19 @@ fun StreamScreen(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun StreamSurface(engine: StreamingEngine, onOpenSettings: () -> Unit) {
+private fun StreamSurface(
+    engine: StreamingEngine,
+    configRevision: Int,
+    onOpenSettings: () -> Unit,
+) {
     val context = LocalContext.current
     val state by engine.state.collectAsState()
-    val chatEnabled = remember { Prefs.chatEnabled(context) }
-    val kickChannel = remember { Prefs.kickChannel(context) }
-    val twitchChannel = remember { Prefs.twitchChannel(context) }
+    // Keyed on configRevision so closing Settings refreshes these. See the
+    // comment at the configRevision declaration for the staleness this fixes.
+    val chatEnabled = remember(configRevision) { Prefs.chatEnabled(context) }
+    val kickChannel = remember(configRevision) { Prefs.kickChannel(context) }
+    val twitchChannel = remember(configRevision) { Prefs.twitchChannel(context) }
+    val streamUrl = remember(configRevision) { Prefs.streamUrl(context) }
     val chatMessages by ChatManager.messages.collectAsState()
 
     val isLive = state is StreamState.Live
@@ -169,6 +209,8 @@ private fun StreamSurface(engine: StreamingEngine, onOpenSettings: () -> Unit) {
     val isDualCamOn by engine.isDualCamOn.collectAsState()
     val dualCamSupported = remember { DualCameraSupport.isSupported(context) }
     val thermalNotice by engine.thermalNotice.collectAsState()
+    val isRecording by engine.isRecording.collectAsState()
+    val recordNotice by engine.recordNotice.collectAsState()
     var stealthActive by remember { mutableStateOf(false) }
 
     LaunchedEffect(chatEnabled, kickChannel) {
@@ -183,20 +225,24 @@ private fun StreamSurface(engine: StreamingEngine, onOpenSettings: () -> Unit) {
         state is StreamState.Reconnecting
     LiveScreenEffect(active = streamActive)
 
-    LaunchedEffect(state) {
+    // Keyed on the state's CLASS, not the instance: Live's bitrate field changes
+    // every second, so instance-keying would cancel and relaunch these effects
+    // once a second for the whole stream.
+    val stateKind = state::class
+    LaunchedEffect(stateKind) {
         if (state is StreamState.Idle || state is StreamState.Error) {
             StreamingService.stop(context)
         }
     }
 
-    LaunchedEffect(state) {
+    LaunchedEffect(stateKind) {
         if (state is StreamState.Error) {
             delay(8000)
-            if (engine.state.value === state) engine.clearError()
+            if (engine.state.value is StreamState.Error) engine.clearError()
         }
     }
 
-    LaunchedEffect(state) {
+    LaunchedEffect(stateKind) {
         if (state === StreamState.Connecting) {
             delay(30_000)
             if (engine.state.value === StreamState.Connecting) {
@@ -227,9 +273,23 @@ private fun StreamSurface(engine: StreamingEngine, onOpenSettings: () -> Unit) {
                     StatusPill(state = state, elapsedSec = elapsedSec)
                     MetricPill(label = "${deviceStatus.batteryPercent}%", dotColor = batteryDotColor(deviceStatus.batteryPercent))
                     MetricPill(label = deviceStatus.thermal.label, dotColor = deviceStatus.thermal.color)
+                    // Link health, live only: is the network keeping up with the
+                    // encoder right now. The glanceable "it's the network" signal.
+                    (state as? StreamState.Live)?.health?.let { health ->
+                        MetricPill(
+                            label = linkHealthLabel(health),
+                            dotColor = linkHealthColor(health),
+                        )
+                    }
+                    if (isRecording) {
+                        MetricPill(label = "REC", dotColor = RoamLive)
+                    }
                 }
                 thermalNotice?.let { notice ->
-                    ThermalBanner(text = notice, onDismiss = { engine.dismissThermalNotice() })
+                    NoticeBanner(text = notice, onDismiss = { engine.dismissThermalNotice() })
+                }
+                recordNotice?.let { notice ->
+                    NoticeBanner(text = notice, onDismiss = { engine.dismissRecordNotice() })
                 }
             }
 
@@ -301,17 +361,11 @@ private fun StreamSurface(engine: StreamingEngine, onOpenSettings: () -> Unit) {
                 )
             }
 
-            val canGoLive = streamActive || Prefs.streamUrl(context).isNotBlank()
-            // TEMP diagnostic: chasing an intermittent dark/unclickable Go Live button
-            // seen with a valid URL saved. Keyed on canGoLive only (not state) so it
-            // logs just the enable/disable transitions, not every per-second bitrate
-            // tick. Tag RoamGoLive. Remove once the bug is understood.
-            LaunchedEffect(canGoLive) {
-                android.util.Log.d(
-                    "RoamGoLive",
-                    "enabled=$canGoLive state=$state urlPresent=${Prefs.streamUrl(context).isNotBlank()}",
-                )
-            }
+            // streamUrl is the configRevision-keyed read from above, so this
+            // re-evaluates the moment Settings closes. (This staleness was the
+            // intermittent dark Go Live button: the old per-recomposition read
+            // only re-ran when battery/thermal happened to tick.)
+            val canGoLive = streamActive || streamUrl.isNotBlank()
             LiveButton(
                 state = state,
                 enabled = canGoLive,
@@ -469,13 +523,25 @@ private fun batteryDotColor(percent: Int): Color = when {
     else -> Color(0xFF53FC18)
 }
 
+private fun linkHealthLabel(health: LinkHealth): String = when (health) {
+    LinkHealth.Good -> "NET OK"
+    LinkHealth.Weak -> "NET WEAK"
+    LinkHealth.Bad -> "NET BAD"
+}
+
+private fun linkHealthColor(health: LinkHealth): Color = when (health) {
+    LinkHealth.Good -> Color(0xFF53FC18)
+    LinkHealth.Weak -> Color(0xFFE8B43A)
+    LinkHealth.Bad -> Color(0xFFFF2D2D)
+}
+
 @Composable
-private fun ThermalBanner(text: String, onDismiss: () -> Unit) {
-    // No auto-dismiss: the banner stays as long as the engine reports a thermal
-    // notice — set while the device is warm/hot, cleared when it returns to
-    // normal. A 6-second toast was trivially missable while driving. Amber, not
+private fun NoticeBanner(text: String, onDismiss: () -> Unit) {
+    // No auto-dismiss: the banner stays as long as the engine reports a notice
+    // (thermal or recording) — set while the condition holds, cleared when it
+    // passes. A 6-second toast was trivially missable while driving. Amber, not
     // brand green, so it reads as a warning. Tap to dismiss; it returns on the
-    // next thermal change.
+    // next change.
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier

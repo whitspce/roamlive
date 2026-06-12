@@ -93,6 +93,8 @@ private val FpsOptions = listOf(30, 60)
 fun SettingsScreen(
     isLive: Boolean,
     onApplyLiveBitrate: (Int) -> Unit,
+    onApplyAutoBitrate: (Boolean) -> Unit,
+    onApplyRecording: (Boolean) -> Unit,
     onApplyStabilization: () -> Unit,
     onClose: () -> Unit,
     onOpenOverlays: () -> Unit,
@@ -111,6 +113,10 @@ fun SettingsScreen(
     var fps by remember { mutableIntStateOf(Prefs.videoFps(context)) }
     var bitrateText by remember {
         mutableStateOf(Prefs.videoBitrateKbps(context).toString())
+    }
+    var autoBitrate by remember { mutableStateOf(Prefs.autoBitrateEnabled(context)) }
+    var recordWhileStreaming by remember {
+        mutableStateOf(Prefs.recordWhileStreaming(context))
     }
     var chatEnabled by remember { mutableStateOf(Prefs.chatEnabled(context)) }
     var kickChannel by remember { mutableStateOf(Prefs.kickChannel(context)) }
@@ -135,6 +141,16 @@ fun SettingsScreen(
             // No-op when not streaming; applies on the fly when live.
             onApplyLiveBitrate(it)
         }
+    }
+    LaunchedEffect(autoBitrate) {
+        Prefs.setAutoBitrateEnabled(context, autoBitrate)
+        // Live-safe: the engine swaps between steered and fixed bitrate on the fly.
+        onApplyAutoBitrate(autoBitrate)
+    }
+    LaunchedEffect(recordWhileStreaming) {
+        Prefs.setRecordWhileStreaming(context, recordWhileStreaming)
+        // Live-safe: starts/stops the recording mid-stream.
+        onApplyRecording(recordWhileStreaming)
     }
     LaunchedEffect(chatEnabled, kickChannel) {
         Prefs.setChatEnabled(context, chatEnabled)
@@ -307,12 +323,41 @@ fun SettingsScreen(
                     placeholder = "2500",
                     keyboardType = KeyboardType.Number,
                 )
+                Spacer(modifier = Modifier.height(12.dp))
+                ToggleRow(
+                    label = "Auto bitrate",
+                    description = "Lowers the bitrate when your connection weakens " +
+                        "so the stream keeps flowing instead of freezing, then " +
+                        "ramps back up as it recovers. The bitrate above is the " +
+                        "maximum it will use.",
+                    checked = autoBitrate,
+                    onCheckedChange = { autoBitrate = it },
+                )
                 if (isLive) {
                     LiveLockNote(
                         "Resolution and frame rate can't change mid-stream. " +
                             "Bitrate can.",
                     )
                 }
+            }
+            Section(title = "Local recording") {
+                ToggleRow(
+                    label = "Record to phone while streaming",
+                    description = "Saves a copy of the broadcast on the phone, and " +
+                        "keeps recording even while the stream is reconnecting, so " +
+                        "a dropout never loses the moment. Uses about 1 GB of " +
+                        "storage per hour at 2500 kbps. Stops itself (never the " +
+                        "stream) if storage runs low.",
+                    checked = recordWhileStreaming,
+                    onCheckedChange = { recordWhileStreaming = it },
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Recordings land in Android/data/dev.whitespc.roam/" +
+                        "files/Movies. Open them with the Files app, or over USB.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp,
+                )
             }
             Section(title = "Auto-reconnect") {
                 Text(
