@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Lock
@@ -55,6 +56,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -231,6 +233,26 @@ fun SettingsScreen(
                         "Beamstream).",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
+                )
+            }
+            Section(title = "Stream title") {
+                Text(
+                    text = "Update your title and category before going live. These " +
+                        "open your platform's dashboard in the browser.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+                LinkRow(
+                    icon = Icons.Filled.Edit,
+                    label = "Twitch dashboard",
+                    description = "Edit your Twitch title, category, and tags.",
+                    url = "https://dashboard.twitch.tv",
+                )
+                LinkRow(
+                    icon = Icons.Filled.Edit,
+                    label = "Kick dashboard",
+                    description = "Edit your Kick title and category.",
+                    url = "https://kick.com/dashboard",
                 )
             }
             Section(title = "Microphone", locked = isLive) {
@@ -556,43 +578,60 @@ fun SettingsScreen(
                 }
             }
             Section(title = "Support") {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            val intent = Intent(
-                                Intent.ACTION_VIEW,
-                                Uri.parse("https://roamlive.app/support"),
-                            )
-                            runCatching { context.startActivity(intent) }
-                        }
-                        .padding(vertical = 8.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Favorite,
-                        contentDescription = null,
-                        tint = RoamLive,
-                        modifier = Modifier.size(22.dp),
-                    )
-                    Spacer(modifier = Modifier.width(14.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        FieldLabel("Support Roam Live")
-                        Text(
-                            text = "Donations help me keep building this.",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 12.sp,
-                        )
-                    }
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.OpenInNew,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
+                LinkRow(
+                    icon = Icons.Filled.Favorite,
+                    label = "Support Roam Live",
+                    description = "Donations help me keep building this.",
+                    url = "https://roamlive.app/support",
+                )
             }
         }
+    }
+}
+
+/** A row that opens a URL in the browser: leading brand-red icon, label and
+ *  description, trailing open-in-new marker. Shared by the dashboard shortcuts
+ *  and the support link. */
+@Composable
+private fun LinkRow(
+    icon: ImageVector,
+    label: String,
+    description: String,
+    url: String,
+) {
+    val context = LocalContext.current
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                }
+            }
+            .padding(vertical = 8.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = RoamLive,
+            modifier = Modifier.size(22.dp),
+        )
+        Spacer(modifier = Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            FieldLabel(label)
+            Text(
+                text = description,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp,
+            )
+        }
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(18.dp),
+        )
     }
 }
 
