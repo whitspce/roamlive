@@ -42,6 +42,15 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import android.net.Network
+import android.os.Environment
+import android.os.StatFs
+import com.pedro.library.base.recording.RecordController
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.math.min
 
 private const val TAG = "RoamStreamingEngine"
 
@@ -49,6 +58,11 @@ private const val VIDEO_GOP_SECONDS = 2
 private const val AUDIO_BITRATE = 128_000
 private const val AUDIO_SAMPLE_RATE = 44_100
 private const val AUDIO_STEREO = true
+
+// Local recording storage guards: refuse to start under 2 GB free, stop the
+// recording (never the stream) if free space falls under 500 MB mid-stream.
+private const val RECORD_MIN_START_BYTES = 2_000_000_000L
+private const val RECORD_MIN_KEEP_BYTES = 500_000_000L
 
 // Single-destination by design. Multi-destination is served by third-party fan-out
 // services (Restream, Beamstream) — phone-side multi-stream multiplies upload over
@@ -102,6 +116,39 @@ class StreamingEngine(private val context: Context) {
      *  (false) fires — so the loop wakes immediately instead of polling state. */
     private var currentAttemptOutcome: CompletableDeferred<Boolean>? = null
 
+    // Adaptive bitrate. The controller owns the down-fast/up-slow steering; the
+    // engine owns the CEILING it may climb to: min(user bitrate, thermal cap).
+    // That split is what keeps auto bitrate and thermal protection from fighting
+    // over the encoder. Toggleable in Settings (default on); when off, the
+    // engine falls back to fixed-bitrate behaviour.
+    private var autoBitrateEnabled = Prefs.autoBitrateEnabled(context)
+    private var thermalCapBps: Int? = null
+    private val bitrateController = AdaptiveBitrateController { bps ->
+        runCatching { if (stream.isStreaming) stream.setVideoBitrateOnFly(bps) }
+            .onFailure { Log.w(TAG, "auto bitrate apply failed", it) }
+    }
+
+    /** The most the encoder is allowed to push right now: the user's configured
+     *  bitrate, further capped by thermal throttling when the phone is hot. */
+    private fun effectiveMaxBitrateBps(): Int =
+        min(Prefs.videoBitrateKbps(context) * 1000, thermalCapBps ?: Int.MAX_VALUE)
+
+    // Link-health derivation. Shares the 1Hz onNewBitrate tick with auto
+    // bitrate; counts consecutive strained seconds (congestion or fresh
+    // dropped frames) to grade Good / Weak / Bad for the NET pill.
+    private var lastDroppedVideoFrames = 0L
+    private var strainedTicks = 0
+
+    private fun applyBitrateCeiling() {
+        val effective = effectiveMaxBitrateBps()
+        if (autoBitrateEnabled) {
+            bitrateController.setCeiling(effective)
+        } else {
+            runCatching { if (stream.isStreaming) stream.setVideoBitrateOnFly(effective) }
+                .onFailure { Log.w(TAG, "bitrate ceiling apply failed", it) }
+        }
+    }
+
     private val connectChecker = object : ConnectChecker {
         override fun onConnectionStarted(url: String) {
             Log.d(TAG, "connection started: $url")
@@ -110,10 +157,33 @@ class StreamingEngine(private val context: Context) {
         override fun onConnectionSuccess() {
             Log.d(TAG, "connection success")
             if (stopRequested) return
+            // Capture BEFORE completing the deferred: the reconnect loop clears
+            // isReconnecting as soon as the outcome lands.
+            val wasReconnecting = isReconnecting
             hasEverConnected = true
             // Signal the reconnect loop (if any) that this attempt succeeded.
             currentAttemptOutcome?.complete(true)
             _state.value = StreamState.Live(0, connectedCount = 1, totalCount = 1)
+            // Fresh connection: aim at the full ceiling and let congestion ticks
+            // pull us down if the link disagrees (reacts within a second or two).
+            if (autoBitrateEnabled) bitrateController.reset(effectiveMaxBitrateBps())
+            // Fresh health baseline for the new connection's counters.
+            lastDroppedVideoFrames = 0
+            strainedTicks = 0
+            runCatching { stream.getStreamClient().resetDroppedVideoFrames() }
+            // Local recording rides the same encoders as the stream and keeps
+            // running through reconnects, so only start it if it isn't already.
+            if (Prefs.recordWhileStreaming(context) && !stream.isRecording) {
+                startRecordSafe()
+            }
+            if (wasReconnecting) {
+                // The encoder pipeline restarted under the GL chain, which can
+                // drop filter textures: the broadcast side comes back with no
+                // watermark/overlays (the known reconnected-VOD bug) even though
+                // the preview still shows them. Rebuild visuals on the main
+                // thread, same as a background-resume.
+                engineScope.launch(Dispatchers.Main) { restoreBroadcastVisuals() }
+            }
         }
 
         override fun onConnectionFailed(reason: String) {
@@ -135,9 +205,27 @@ class StreamingEngine(private val context: Context) {
 
         override fun onNewBitrate(bitrate: Long) {
             if (stopRequested) return
+            val client = stream.getStreamClient()
+            // Congestion = the client's send cache is filling (frames queueing
+            // faster than the socket drains them; 20% full counts). Feeds both
+            // the adaptive-bitrate loop and the health grade.
+            val congested = runCatching { client.hasCongestion(20f) }.getOrDefault(false)
+            if (autoBitrateEnabled && stream.isStreaming) {
+                bitrateController.onBitrateMeasured(bitrate, congested)
+            }
+            val dropped = runCatching { client.getDroppedVideoFrames() }.getOrDefault(0L)
+            val droppedDelta = dropped - lastDroppedVideoFrames
+            lastDroppedVideoFrames = dropped
+            strainedTicks = if (congested || droppedDelta > 0) strainedTicks + 1 else 0
+            val health = when {
+                strainedTicks == 0 -> LinkHealth.Good
+                strainedTicks < 3 -> LinkHealth.Weak
+                else -> LinkHealth.Bad
+            }
+            maybeCheckRecordingStorage()
             val current = _state.value
             if (current is StreamState.Live) {
-                _state.value = current.copy(bitrateBps = bitrate)
+                _state.value = current.copy(bitrateBps = bitrate, health = health)
             }
         }
 
@@ -184,10 +272,11 @@ class StreamingEngine(private val context: Context) {
 
     private val tokenSource = dev.whitespc.roam.streaming.overlay.TokenSource(context)
 
-    /** Wall-clock millis at which the current go-live attempt entered the
-     *  streamActive window. Set in [start]; preserved across reconnects so the
-     *  `{stream_time}` token counts continuously; cleared on a real stop. Null
-     *  means "not streaming." */
+    /** Monotonic-clock millis (elapsedRealtime) at which the current go-live
+     *  attempt started. Monotonic so an NTP clock correction mid-stream can't
+     *  jump the `{stream_time}` token. Set in [start]; preserved across
+     *  reconnects so the token counts continuously; cleared on a real stop.
+     *  Null means "not streaming." */
     private var liveStartMs: Long? = null
 
     private val overlayRenderer = OverlayRenderer(
@@ -200,7 +289,7 @@ class StreamingEngine(private val context: Context) {
     )
 
     private fun currentStreamUptimeSec(): Int? =
-        liveStartMs?.let { ((System.currentTimeMillis() - it) / 1000L).toInt() }
+        liveStartMs?.let { ((SystemClock.elapsedRealtime() - it) / 1000L).toInt() }
     /** Tracks which way the main camera (the encoder's video source) is currently
      *  facing. Camera2Source defaults to BACK, so we start at false (back). Flipped
      *  whenever switchCamera runs. Needed so we can enable PiP with the OPPOSITE
@@ -236,6 +325,29 @@ class StreamingEngine(private val context: Context) {
             NetworkMonitor.isAvailable.drop(1).collect { available ->
                 if (!available && wantStreaming && _state.value is StreamState.Live) {
                     Log.d(TAG, "network lost while live, entering reconnect proactively")
+                    runCatching { if (stream.isStreaming) stream.stopStream() }
+                    startReconnect()
+                }
+            }
+        }
+        // The loss watcher above never fires on a network SWITCH: leaving WiFi for
+        // cellular (or arriving home, the reverse) is make-before-break, so "some
+        // network is up" stays true the whole time. But our socket is bound to the
+        // OLD network, which is dying; left alone, detection waits on a TCP write
+        // timeout while viewers stare at a frozen frame. So: when the network that
+        // new connections route over changes identity while we're live, restart
+        // the stream on the new one immediately via the normal reconnect path.
+        engineScope.launch {
+            var previous: Network? = null
+            NetworkMonitor.defaultNetwork.collect { current ->
+                val old = previous
+                previous = current
+                // current == null (total loss) is the loss watcher's job, and a
+                // first value after subscribe (old == null) is not a switch.
+                if (old != null && current != null && current != old &&
+                    wantStreaming && _state.value is StreamState.Live
+                ) {
+                    Log.d(TAG, "default network switched ($old -> $current), restarting stream")
                     runCatching { if (stream.isStreaming) stream.stopStream() }
                     startReconnect()
                 }
@@ -277,20 +389,60 @@ class StreamingEngine(private val context: Context) {
         if (stream.isOnPreview) stream.stopPreview()
         stream.startPreview(view)
         applyStabilization()
-        // Re-apply the overlay scene on every attach (not just the first one).
-        // When the app is backgrounded without being killed, the OpenGL surface
-        // gets torn down and the existing filters lose their GPU textures —
-        // they'd draw blank on return. Re-applying always is the simplest way
-        // to stay correct across both cold launches and background-resume.
-        // It does mean a web overlay reloads when you return from background.
-        // BRB / camera-off / dual-cam PiP are separate mode-based filters
-        // managed elsewhere; not part of the scene.
-        //
-        // Skipped while BRB is active so we don't re-stamp the watermark and
-        // overlays on top of the streamer's BRB screen. They'll be restored
-        // when the user exits BRB.
-        if (!_isBrb.value) {
+        // The OpenGL surface was just (re)created, so filters from a previous
+        // surface lost their GPU textures and would draw blank. Rebuild the
+        // whole visual state on every attach: cold launch, background-resume,
+        // and (new) backgrounding during BRB now restores the BRB screen
+        // instead of silently dropping it on return. Costs a web overlay
+        // reload when returning from background.
+        restoreBroadcastVisuals()
+    }
+
+    /**
+     * Rebuild every GL-side visual the broadcast depends on, from prefs and the
+     * engine's own state flags: either the BRB takeover (scene stays cleared
+     * underneath it, same as toggleBrb), or the overlay scene plus the
+     * camera-off black layer if the camera is muted.
+     *
+     * Needed whenever the GL surface or encoder pipeline restarts underneath
+     * us: background-resume (surface destroyed/recreated) and stream reconnect
+     * (encoder restarted). In both cases the filters lose their GPU textures
+     * while our state flags still say they should be visible.
+     */
+    private fun restoreBroadcastVisuals() {
+        val gl = stream.getGlInterface()
+        if (_isBrb.value) {
+            // Same construction as toggleBrb's enter path. Remove stale refs
+            // first; they may be dead textures after a GL restart.
+            runCatching {
+                brbForegroundFilter?.let { gl.removeFilter(it) }
+                brbBlackFilter?.let { gl.removeFilter(it) }
+                val black = BlackFilterRender()
+                val foreground: BaseFilterRender =
+                    Prefs.brbImagePath(context)
+                        ?.let { createBrbImageFilter(it) }
+                        ?: createBrbTextFilter(Prefs.brbText(context))
+                gl.addFilter(0, black)
+                gl.addFilter(1, foreground)
+                brbBlackFilter = black
+                brbForegroundFilter = foreground
+                dualCamera.setPipVisible(false)
+            }.onFailure { Log.w(TAG, "BRB restore failed", it) }
+        } else {
             overlayRenderer.applyScene(Prefs.overlayScene(context))
+            // gl.muteVideo() and the BlackFilterRender don't survive the GL
+            // restart, but our _isCameraOff flag does. Without this, a user who
+            // backgrounds with camera off resumes with the camera visibly back on.
+            if (_isCameraOff.value) {
+                runCatching {
+                    blackFilter?.let { gl.removeFilter(it) }
+                    gl.muteVideo()
+                    val fresh = BlackFilterRender()
+                    gl.addFilter(fresh)
+                    blackFilter = fresh
+                    dualCamera.setPipVisible(false)
+                }.onFailure { Log.w(TAG, "camera-off restore failed", it) }
+            }
         }
     }
 
@@ -370,13 +522,130 @@ class StreamingEngine(private val context: Context) {
             .onFailure { Log.w(TAG, "applyScene failed", it) }
     }
 
-    /** Apply a new video bitrate to the running stream immediately. Bitrate is the
-     *  one quality setting RootEncoder can change mid-stream. No-op when not
-     *  streaming; the value is then picked up by syncConfig / prepare next time. */
+    /** Apply a new user-chosen bitrate to the running stream. With auto bitrate
+     *  on, the value becomes the new ceiling: lowering it clamps immediately,
+     *  raising it lets the controller climb there over the next seconds. With
+     *  auto bitrate off, it applies directly (thermal cap still wins). No-op when
+     *  not streaming; the value is then picked up by syncConfig / prepare. */
     fun setBitrate(kbps: Int) {
         if (!stream.isStreaming) return
-        runCatching { stream.setVideoBitrateOnFly(kbps * 1000) }
-            .onFailure { Log.w(TAG, "setBitrate failed", it) }
+        val effective = min(kbps * 1000, thermalCapBps ?: Int.MAX_VALUE)
+        if (autoBitrateEnabled) {
+            bitrateController.setCeiling(effective)
+        } else {
+            runCatching { stream.setVideoBitrateOnFly(effective) }
+                .onFailure { Log.w(TAG, "setBitrate failed", it) }
+        }
+    }
+
+    /** Toggle auto bitrate, live-safe. Turning it on mid-stream starts steering
+     *  from the current ceiling; turning it off restores the fixed configured
+     *  bitrate (still under any active thermal cap). */
+    fun setAutoBitrate(enabled: Boolean) {
+        autoBitrateEnabled = enabled
+        if (!stream.isStreaming) return
+        if (enabled) {
+            bitrateController.reset(effectiveMaxBitrateBps())
+        } else {
+            runCatching { stream.setVideoBitrateOnFly(effectiveMaxBitrateBps()) }
+                .onFailure { Log.w(TAG, "fixed bitrate restore failed", it) }
+        }
+    }
+
+    // ---- Local recording -------------------------------------------------
+    // A copy of the broadcast saved on the phone, riding the SAME encoders as
+    // the stream (so it costs storage I/O, not a second encode). Because the
+    // encoders stay alive while the protocol client reconnects, the recording
+    // keeps capturing right through a dropout: the gap viewers saw is not in
+    // the local file. Failure policy is one-directional: recording problems
+    // stop the RECORDING, never the stream.
+
+    private val _isRecording = MutableStateFlow(false)
+    val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
+
+    /** One-line notices about recording (refused start, storage stop). Shown
+     *  by the UI like the thermal banner; null when there's nothing to say. */
+    private val _recordNotice = MutableStateFlow<String?>(null)
+    val recordNotice: StateFlow<String?> = _recordNotice.asStateFlow()
+
+    fun dismissRecordNotice() {
+        _recordNotice.value = null
+    }
+
+    private var recordTickCounter = 0
+
+    private val recordListener = object : RecordController.Listener {
+        override fun onStatusChange(status: RecordController.Status) {
+            Log.d(TAG, "record status: $status")
+            when (status) {
+                RecordController.Status.RECORDING -> _isRecording.value = true
+                RecordController.Status.STOPPED -> _isRecording.value = false
+                else -> Unit
+            }
+        }
+
+        override fun onError(e: Exception) {
+            Log.w(TAG, "record error", e)
+            runCatching { if (stream.isRecording) stream.stopRecord() }
+            _isRecording.value = false
+            _recordNotice.value = "Recording failed and stopped. The stream is not affected."
+        }
+    }
+
+    /** App-private Movies dir: no permissions needed on any Android version.
+     *  Reachable at Android/data/dev.whitespc.roam/files/Movies via USB or the
+     *  Files app. Falls back to internal storage if external is unavailable. */
+    private fun recordingsDir(): File =
+        context.getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: context.filesDir
+
+    private fun startRecordSafe() {
+        if (stream.isRecording) return
+        val dir = recordingsDir()
+        dir.mkdirs()
+        val freeBytes = runCatching { StatFs(dir.absolutePath).availableBytes }.getOrDefault(0L)
+        if (freeBytes < RECORD_MIN_START_BYTES) {
+            _recordNotice.value =
+                "Not recording: needs at least 2 GB of free storage. Streaming anyway."
+            return
+        }
+        val name = "roam-" +
+            SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date()) + ".mp4"
+        recordTickCounter = 0
+        runCatching { stream.startRecord(File(dir, name).absolutePath, recordListener) }
+            .onFailure {
+                Log.w(TAG, "startRecord failed", it)
+                _recordNotice.value = "Couldn't start recording. The stream is not affected."
+            }
+    }
+
+    private fun stopRecordSafe() {
+        runCatching { if (stream.isRecording) stream.stopRecord() }
+            .onFailure { Log.w(TAG, "stopRecord failed", it) }
+        _isRecording.value = false
+    }
+
+    /** Called once a second from onNewBitrate; roughly once a minute while
+     *  recording, make sure storage isn't about to run out. Stops the
+     *  recording with a notice, never the stream. */
+    private fun maybeCheckRecordingStorage() {
+        if (!stream.isRecording) return
+        recordTickCounter++
+        if (recordTickCounter < 60) return
+        recordTickCounter = 0
+        val freeBytes = runCatching { StatFs(recordingsDir().absolutePath).availableBytes }
+            .getOrDefault(Long.MAX_VALUE)
+        if (freeBytes < RECORD_MIN_KEEP_BYTES) {
+            stopRecordSafe()
+            _recordNotice.value = "Recording stopped: storage almost full. The stream keeps going."
+        }
+    }
+
+    /** Settings toggle, live-safe: turning it on mid-stream starts recording
+     *  now; off stops it. When idle this is a no-op; the pref is read at the
+     *  next go-live. */
+    fun setRecordWhileStreaming(enabled: Boolean) {
+        if (!stream.isStreaming) return
+        if (enabled) startRecordSafe() else stopRecordSafe()
     }
 
     fun start(url: String) {
@@ -388,6 +657,12 @@ class StreamingEngine(private val context: Context) {
 
         if (!stream.isOnPreview) {
             _state.value = StreamState.Error("Camera not ready")
+            return
+        }
+        // Reachable from the Error state (e.g. after "Encoder unavailable"), so
+        // re-check that prepare actually succeeded before starting encoders.
+        if (!isPrepared) {
+            _state.value = StreamState.Error("Encoder not ready")
             return
         }
         val cleanUrl = url.trim()
@@ -403,7 +678,7 @@ class StreamingEngine(private val context: Context) {
         wantStreaming = true
         hasEverConnected = false
         lastStreamUrl = cleanUrl
-        liveStartMs = System.currentTimeMillis()
+        liveStartMs = SystemClock.elapsedRealtime()
         _state.value = StreamState.Connecting
         runCatching { stream.startStream(cleanUrl) }
             .onFailure { t ->
@@ -420,6 +695,7 @@ class StreamingEngine(private val context: Context) {
         reconnectJob = null
         isReconnecting = false
         liveStartMs = null
+        stopRecordSafe()
         runCatching { if (stream.isStreaming) stream.stopStream() }
         _state.value = StreamState.Idle
     }
@@ -437,6 +713,7 @@ class StreamingEngine(private val context: Context) {
         dualCamera.release()
         overlayRenderer.clear()
         tokenSource.release()
+        stopRecordSafe()
         runCatching { if (stream.isStreaming) stream.stopStream() }
         if (stream.isOnPreview) stream.stopPreview()
         engineScope.cancel()
@@ -507,6 +784,9 @@ class StreamingEngine(private val context: Context) {
                     "Reconnect failed after ${maxSeconds / 60} min",
                 )
                 wantStreaming = false
+                // The encoders kept the recording alive through the outage;
+                // now that we've given up on the stream, close the file too.
+                stopRecordSafe()
                 return
             }
 
@@ -722,7 +1002,16 @@ class StreamingEngine(private val context: Context) {
                 // Restore the overlay scene now that BRB is dismissed — picks
                 // up any edits the user made via the editor during BRB.
                 overlayRenderer.applyScene(Prefs.overlayScene(context))
-                dualCamera.setPipVisible(true)
+                // Restore the camera-off black layer if the user still has
+                // their camera muted — we removed it on BRB enter so the BRB
+                // image could show. PiP visibility tracks camera-off too
+                // (hidden when the camera's off, visible otherwise).
+                if (_isCameraOff.value) {
+                    val restored = BlackFilterRender()
+                    gl.addFilter(restored)
+                    blackFilter = restored
+                }
+                dualCamera.setPipVisible(!_isCameraOff.value)
                 if (!muteBeforeBrb && _isMuted.value) {
                     mic?.unMute()
                     _isMuted.value = false
@@ -736,6 +1025,16 @@ class StreamingEngine(private val context: Context) {
                 // clean — no watermark or other overlays stamped over the
                 // image / text they chose as their takeover.
                 overlayRenderer.clear()
+                // Camera-off appends a BlackFilterRender at the END of the chain
+                // so it draws on top. With BRB's filters added at indices 0/1,
+                // the camera-off black would still draw last and hide the BRB
+                // image. Pull it out for the duration of BRB; restored on exit
+                // if camera-off is still on. We deliberately leave _isCameraOff
+                // and gl.muteVideo() alone — the user's intent is preserved.
+                if (_isCameraOff.value) {
+                    blackFilter?.let { gl.removeFilter(it) }
+                    blackFilter = null
+                }
                 val black = BlackFilterRender()
                 // Custom image (if the user set one in Settings) takes priority
                 // over the text. If image decode fails, fall back to the text.
@@ -797,25 +1096,32 @@ class StreamingEngine(private val context: Context) {
             setPosition(TranslateTo.CENTER)
         }
 
+    /** Thermal protection expressed as a bitrate CEILING, not a direct set: with
+     *  auto bitrate on, the controller keeps steering underneath the cap (the
+     *  network may justify even less); with it off, the cap applies directly.
+     *  Cleared caps restore the configured bitrate the same way. */
     private fun handleThermalChange(status: Int) {
         if (!stream.isStreaming) return
         val configuredBitrate = Prefs.videoBitrateKbps(context) * 1000
         when (status) {
             PowerManager.THERMAL_STATUS_NONE,
             PowerManager.THERMAL_STATUS_LIGHT -> {
-                runCatching { stream.setVideoBitrateOnFly(configuredBitrate) }
+                thermalCapBps = null
+                applyBitrateCeiling()
                 _thermalNotice.value = null
             }
             PowerManager.THERMAL_STATUS_MODERATE -> {
-                val target = (configuredBitrate * 0.7).toInt()
-                runCatching { stream.setVideoBitrateOnFly(target) }
-                _thermalNotice.value = "Phone warming, bitrate dropped to ${target / 1000} kbps"
+                val cap = (configuredBitrate * 0.7).toInt()
+                thermalCapBps = cap
+                applyBitrateCeiling()
+                _thermalNotice.value = "Phone warming, bitrate capped at ${cap / 1000} kbps"
             }
             PowerManager.THERMAL_STATUS_SEVERE -> {
-                val target = (configuredBitrate * 0.4).toInt()
-                runCatching { stream.setVideoBitrateOnFly(target) }
+                val cap = (configuredBitrate * 0.4).toInt()
+                thermalCapBps = cap
+                applyBitrateCeiling()
                 _thermalNotice.value =
-                    "Phone hot — bitrate dropped to ${target / 1000} kbps. " +
+                    "Phone hot, bitrate capped at ${cap / 1000} kbps. " +
                         "Stealth mode (screen off) helps it cool."
             }
             PowerManager.THERMAL_STATUS_CRITICAL,

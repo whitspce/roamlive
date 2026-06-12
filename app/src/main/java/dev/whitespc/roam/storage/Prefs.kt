@@ -30,6 +30,8 @@ object Prefs {
     private const val KEY_GPS_TOKEN_WARNING_SEEN = "gps_token_warning_seen"
     private const val KEY_STABILIZATION_ENABLED = "stabilization_enabled"
     private const val KEY_BRB_IMAGE_PATH = "brb_image_path"
+    private const val KEY_AUTO_BITRATE = "auto_bitrate"
+    private const val KEY_RECORD_WHILE_STREAMING = "record_while_streaming"
 
     private const val DEFAULT_BRB_TEXT = "BE RIGHT BACK"
     private const val DEFAULT_STEALTH_PULSE_SEC = 30
@@ -88,6 +90,27 @@ object Prefs {
 
     fun setVideoBitrateKbps(context: Context, kbps: Int) {
         sp(context).edit().putInt(KEY_VIDEO_BITRATE_KBPS, kbps).apply()
+    }
+
+    /** Auto bitrate: steer the encoder down when the network congests and back up
+     *  as it recovers, instead of pushing a fixed rate into a link that can't carry
+     *  it. The configured bitrate acts as the ceiling. Default on; turning it off
+     *  restores fixed-bitrate behaviour. */
+    fun autoBitrateEnabled(context: Context): Boolean =
+        sp(context).getBoolean(KEY_AUTO_BITRATE, true)
+
+    fun setAutoBitrateEnabled(context: Context, enabled: Boolean) {
+        sp(context).edit().putBoolean(KEY_AUTO_BITRATE, enabled).apply()
+    }
+
+    /** Local recording: save a copy of the broadcast to the phone while
+     *  streaming, so dropouts never lose the moment. Off by default; costs
+     *  roughly 1 GB of storage per hour at 2500 kbps. */
+    fun recordWhileStreaming(context: Context): Boolean =
+        sp(context).getBoolean(KEY_RECORD_WHILE_STREAMING, false)
+
+    fun setRecordWhileStreaming(context: Context, enabled: Boolean) {
+        sp(context).edit().putBoolean(KEY_RECORD_WHILE_STREAMING, enabled).apply()
     }
 
     fun chatEnabled(context: Context): Boolean =

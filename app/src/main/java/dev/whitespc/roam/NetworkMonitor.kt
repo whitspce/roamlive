@@ -37,6 +37,15 @@ object NetworkMonitor {
     private val _onAvailable = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
     val onAvailable: SharedFlow<Unit> = _onAvailable.asSharedFlow()
 
+    /** The network Android currently routes new connections over. Distinct from
+     *  [isAvailable]: on a WiFi-to-cellular handoff Android brings cellular up
+     *  BEFORE WiFi drops (make-before-break), so isAvailable never blips, but any
+     *  socket bound to the old WiFi network is dead or dying. The streaming engine
+     *  watches this to restart the stream on the new network immediately instead
+     *  of waiting out a TCP write timeout on the old one. */
+    private val _defaultNetwork = MutableStateFlow<Network?>(null)
+    val defaultNetwork: StateFlow<Network?> = _defaultNetwork.asStateFlow()
+
     fun init(context: Context) {
         val cm = context.applicationContext
             .getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -67,6 +76,23 @@ object NetworkMonitor {
                 Log.d(TAG, "network lost ($network) — remaining: ${activeNetworks.size}")
                 if (nowEmpty) {
                     _isAvailable.value = false
+                }
+            }
+        })
+
+        // Separate callback for the DEFAULT network (the one new sockets use).
+        // Network.equals compares the kernel netId, so a WiFi-to-cell switch is a
+        // value change here even while both networks briefly coexist.
+        cm.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                Log.d(TAG, "default network now $network")
+                _defaultNetwork.value = network
+            }
+
+            override fun onLost(network: Network) {
+                if (_defaultNetwork.value == network) {
+                    Log.d(TAG, "default network lost ($network)")
+                    _defaultNetwork.value = null
                 }
             }
         })
