@@ -212,6 +212,15 @@ private fun StreamSurface(
     val isRecording by engine.isRecording.collectAsState()
     val recordNotice by engine.recordNotice.collectAsState()
     var stealthActive by remember { mutableStateOf(false) }
+    // Critical heat asks for the screen to go dark: the display is a real heat
+    // source and stealth buys cooling time before the engine's last-resort stop.
+    val stealthRequested by engine.stealthRequested.collectAsState()
+    LaunchedEffect(stealthRequested) {
+        if (stealthRequested) {
+            stealthActive = true
+            engine.consumeStealthRequest()
+        }
+    }
 
     LaunchedEffect(chatEnabled, kickChannel) {
         ChatManager.setKickChannel(if (chatEnabled) kickChannel.trim() else null)

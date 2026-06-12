@@ -62,8 +62,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings as AndroidSettings
+import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.compose.material.icons.filled.BatteryAlert
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -400,6 +405,72 @@ fun SettingsScreen(
                     selected = maxReconnectMin,
                     onSelect = { maxReconnectMin = it },
                 )
+            }
+            Section(title = "Reliability") {
+                val pm = remember {
+                    context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                }
+                var batteryExempt by remember {
+                    mutableStateOf(
+                        pm?.isIgnoringBatteryOptimizations(context.packageName) == true,
+                    )
+                }
+                // Re-check when we come back from the system dialog.
+                LifecycleResumeEffect(Unit) {
+                    batteryExempt =
+                        pm?.isIgnoringBatteryOptimizations(context.packageName) == true
+                    onPauseOrDispose { }
+                }
+                if (batteryExempt) {
+                    Text(
+                        text = "Battery optimisation is off for Roam, so Android " +
+                            "won't kill a long stream in the background.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                    )
+                } else {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(
+                                            AndroidSettings
+                                                .ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                            Uri.parse("package:${context.packageName}"),
+                                        ),
+                                    )
+                                }
+                            }
+                            .padding(vertical = 8.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.BatteryAlert,
+                            contentDescription = null,
+                            tint = RoamLive,
+                            modifier = Modifier.size(22.dp),
+                        )
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            FieldLabel("Keep long streams alive")
+                            Text(
+                                text = "Some phones (Samsung, Xiaomi especially) kill " +
+                                    "apps mid-stream to save battery. This asks " +
+                                    "Android to leave Roam alone while it works.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 12.sp,
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
             }
             Section(title = "Chat panel") {
                 Row(

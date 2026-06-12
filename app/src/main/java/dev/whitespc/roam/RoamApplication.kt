@@ -63,9 +63,12 @@ class RoamApplication : Application() {
         while (cur != null) {
             for (frame in cur.stackTrace) {
                 val cls = frame.className
+                // ktor patterns kept for older code paths; java.net covers
+                // RootEncoder 2.7.3+, which moved from ktor to plain Java sockets.
                 if (cls.startsWith("io.ktor.network.") ||
                     cls.startsWith("io.ktor.utils.io.") ||
-                    cls.startsWith("sun.nio.ch.")
+                    cls.startsWith("sun.nio.ch.") ||
+                    cls.startsWith("java.net.")
                 ) {
                     return true
                 }

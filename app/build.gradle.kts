@@ -1,5 +1,6 @@
 import java.io.FileInputStream
 import java.util.Properties
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.android.application)
@@ -25,7 +26,10 @@ val hasSigningCreds = resolvedStoreFile != null && resolvedStorePassword != null
 
 android {
     namespace = "dev.whitespc.roam"
-    compileSdk = 35
+    // 36 required by RootEncoder 2.7.x. targetSdk stays 35 on purpose: compiling
+    // against 36 only unlocks the newer APIs; raising target changes runtime
+    // behaviour and gets its own deliberate pass (Play will eventually force it).
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "dev.whitespc.roam"
@@ -48,13 +52,21 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8: dead-code and resource shrinking roughly halves the APK.
+            // proguard-rules.pro carries the one reflection keep-rule we need.
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            if (hasSigningCreds) {
-                signingConfig = signingConfigs.getByName("release")
+            // Real key when the env vars are set (the release script's path);
+            // debug key otherwise so a local `assembleRelease` still produces
+            // an installable APK for testing the minified build on-device.
+            signingConfig = if (hasSigningCreds) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
             }
         }
     }
@@ -64,8 +76,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_17)
+        }
     }
 
     buildFeatures {
