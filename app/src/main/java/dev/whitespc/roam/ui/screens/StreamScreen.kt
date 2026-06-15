@@ -139,6 +139,7 @@ fun StreamScreen(modifier: Modifier = Modifier) {
                         onApplyAutoBitrate = { engine.setAutoBitrate(it) },
                         onApplyRecording = { engine.setRecordWhileStreaming(it) },
                         onApplyStabilization = { engine.applyStabilization() },
+                        onApplyDualCam = { engine.setDualCamSettingEnabled(it) },
                         onClose = {
                             screen = Screen.Main
                             engine.syncConfig(context)
@@ -188,10 +189,14 @@ private fun StreamSurface(
     var nowMs by remember { mutableLongStateOf(0L) }
     LaunchedEffect(isLive) {
         if (isLive) {
-            liveStartMs = System.currentTimeMillis()
+            // SystemClock.elapsedRealtime (monotonic, can't drift) matches what
+            // the engine uses for `{stream_time}`. System.currentTimeMillis()
+            // gets nudged by NTP and made the LIVE-pill counter and the overlay
+            // disagree by tens of seconds on at least one field test.
+            liveStartMs = android.os.SystemClock.elapsedRealtime()
             nowMs = liveStartMs
             while (true) {
-                nowMs = System.currentTimeMillis()
+                nowMs = android.os.SystemClock.elapsedRealtime()
                 kotlinx.coroutines.delay(1000)
             }
         } else {
@@ -208,6 +213,7 @@ private fun StreamSurface(
     val isTorchOn by engine.isTorchOn.collectAsState()
     val isDualCamOn by engine.isDualCamOn.collectAsState()
     val dualCamSupported = remember { DualCameraSupport.isSupported(context) }
+    val dualCamEnabled = remember(configRevision) { Prefs.dualCamEnabled(context) }
     val thermalNotice by engine.thermalNotice.collectAsState()
     val isRecording by engine.isRecording.collectAsState()
     val recordNotice by engine.recordNotice.collectAsState()
@@ -310,23 +316,16 @@ private fun StreamSurface(
                     .padding(16.dp),
             ) {
                 IconChip(
-                    icon = Icons.Filled.Settings,
-                    description = "Settings",
-                    onClick = onOpenSettings,
-                )
-                IconChip(
                     icon = Icons.Filled.FlipCameraAndroid,
                     description = if (isDualCamOn) "Swap main and PiP cameras" else "Switch camera",
                     onClick = { engine.switchCamera() },
                 )
-                if (dualCamSupported) {
-                    IconChip(
-                        icon = Icons.Filled.PictureInPictureAlt,
-                        description = if (isDualCamOn) "Turn dual camera off" else "Turn dual camera on",
-                        onClick = { engine.toggleDualCam() },
-                        accent = if (isDualCamOn) RoamLive else null,
-                    )
-                }
+                IconChip(
+                    icon = Icons.Filled.Coffee,
+                    description = if (isBrb) "End break" else "Break screen",
+                    onClick = { engine.toggleBrb() },
+                    accent = if (isBrb) RoamLive else null,
+                )
                 IconChip(
                     icon = if (isTorchOn) Icons.Filled.FlashlightOn else Icons.Filled.FlashlightOff,
                     description = if (isTorchOn) "Turn torch off" else "Turn torch on",
@@ -345,17 +344,24 @@ private fun StreamSurface(
                     onClick = { engine.toggleCameraOff() },
                     accent = if (isCameraOff || isBrb) RoamLive else null,
                 )
-                IconChip(
-                    icon = Icons.Filled.Coffee,
-                    description = if (isBrb) "End break" else "Break screen",
-                    onClick = { engine.toggleBrb() },
-                    accent = if (isBrb) RoamLive else null,
-                )
+                if (dualCamSupported && dualCamEnabled) {
+                    IconChip(
+                        icon = Icons.Filled.PictureInPictureAlt,
+                        description = if (isDualCamOn) "Turn dual camera off" else "Turn dual camera on",
+                        onClick = { engine.toggleDualCam() },
+                        accent = if (isDualCamOn) RoamLive else null,
+                    )
+                }
                 IconChip(
                     icon = Icons.Filled.VisibilityOff,
                     description = "Stealth mode",
                     onClick = { stealthActive = true },
                     enabled = streamActive,
+                )
+                IconChip(
+                    icon = Icons.Filled.Settings,
+                    description = "Settings",
+                    onClick = onOpenSettings,
                 )
             }
 

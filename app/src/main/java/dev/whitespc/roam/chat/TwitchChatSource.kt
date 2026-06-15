@@ -1,17 +1,17 @@
 package dev.whitespc.roam.chat
 
 import android.graphics.Color
-import android.util.Log
+import dev.whitespc.roam.diagnostics.RoamLog as Log
 import dev.whitespc.roam.NetworkMonitor
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -42,12 +42,13 @@ class TwitchChatSource(private val channelName: String) : ChatSource {
     override suspend fun connect() {
         val channel = channelName.lowercase().trim()
         if (channel.isBlank()) return
-        var attempt = 0
+        var failureStreak = 0
         while (currentCoroutineContext().isActive) {
-            attempt++
-            Log.d(TAG, "connect attempt $attempt for #$channel")
+            failureStreak++
+            Log.d(TAG, "connect attempt $failureStreak for #$channel")
             val closed = CompletableDeferred<Unit>()
-            val ws = openSocket(channel, closed)
+            val opened = CompletableDeferred<Unit>()
+            val ws = openSocket(channel, closed, opened)
             webSocket = ws
             try {
                 closed.await()
@@ -57,12 +58,17 @@ class TwitchChatSource(private val channelName: String) : ChatSource {
                 webSocket = null
             }
             if (!currentCoroutineContext().isActive) return
-            // First wait until network is up — returns immediately if it already is.
+            // Reset the backoff if this attempt actually opened the socket — the
+            // next failure is a NEW problem, not the same DNS/server flake we
+            // were backing off from.
+            if (opened.isCompleted) failureStreak = 0
             NetworkMonitor.isAvailable.filter { it }.first()
             if (!currentCoroutineContext().isActive) return
-            // Then a brief backoff so we don't hammer if the failure is server-side
-            // rather than network-side.
-            delay(if (attempt <= 3) 1000L else 5000L)
+            // Exponential backoff (1s, 2s, 4s, 8s, 16s, 32s, capped at 60s),
+            // but wake early on a new network arrival so a wifi↔cellular flip
+            // reconnects in <1s instead of waiting out the delay.
+            val backoffMs = nextBackoffMs(failureStreak)
+            withTimeoutOrNull(backoffMs) { NetworkMonitor.onAvailable.first() }
         }
     }
 
@@ -71,10 +77,15 @@ class TwitchChatSource(private val channelName: String) : ChatSource {
         webSocket = null
     }
 
-    private fun openSocket(channel: String, closed: CompletableDeferred<Unit>): WebSocket {
+    private fun openSocket(
+        channel: String,
+        closed: CompletableDeferred<Unit>,
+        opened: CompletableDeferred<Unit>,
+    ): WebSocket {
         val request = Request.Builder().url(IRC_URL).build()
         return httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
+                opened.complete(Unit)
                 val nick = "justinfan${Random.nextInt(10_000, 99_999)}"
                 ws.send("CAP REQ :twitch.tv/tags")
                 ws.send("PASS SCHMOOPIIE")

@@ -1,11 +1,13 @@
 package dev.whitespc.roam.streaming
 
+import android.content.ContentValues
 import android.content.Context
 import android.graphics.Color as AndroidColor
 import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
-import android.util.Log
+import android.provider.MediaStore
+import dev.whitespc.roam.diagnostics.RoamLog as Log
 import android.view.MotionEvent
 import com.pedro.common.AudioCodec
 import com.pedro.common.ConnectChecker
@@ -74,8 +76,6 @@ private const val SRT_LATENCY_MS = 2_000
 
 // Severe-heat fallback resolution: cutting pixel count cuts encoder load far
 // harder than bitrate alone. 480p16:9; applied once per stream, restored on stop.
-private const val HEAT_FALLBACK_WIDTH = 854
-private const val HEAT_FALLBACK_HEIGHT = 480
 
 // Critical heat: how long auto-stealth gets to cool the phone before we stop
 // the stream as the last resort.
@@ -185,17 +185,14 @@ class StreamingEngine(private val context: Context) {
     private fun isSrtUrl(url: String?): Boolean =
         url?.startsWith("srt://", ignoreCase = true) == true
 
-    /** Asks onConnectionSuccess to rebuild GL visuals even when the connect
-     *  isn't a reconnect, e.g. after the severe-heat resolution step-down
-     *  restarts the encoder pipeline. */
-    @Volatile private var pendingVisualRestore = false
-
-    /** One-shot per stream: severe heat steps the encode down to 480p. Reset
-     *  when the stream stops (stop() re-prepares from prefs via syncConfig). */
-    private var heatDowngradedResolution = false
-
     /** Pending stop-at-critical-heat timer; cancelled if the phone cools. */
     private var criticalStopJob: Job? = null
+
+    /** Periodic thermal headroom logger. Runs while streaming so field-test
+     *  logs include a continuous heat curve instead of only status-change
+     *  transitions (the listener fires rarely; headroom is a 0..1 continuous
+     *  signal where ~1.0 means throttling imminent). */
+    private var headroomLoggerJob: Job? = null
 
     private fun applyBitrateCeiling() {
         val effective = effectiveMaxBitrateBps()
@@ -209,7 +206,9 @@ class StreamingEngine(private val context: Context) {
 
     private val connectChecker = object : ConnectChecker {
         override fun onConnectionStarted(url: String) {
-            Log.d(TAG, "connection started: $url")
+            // Redact: the URL contains the stream KEY, and the diagnostic log
+            // file is meant to be shareable. Keep scheme + host for debugging.
+            Log.d(TAG, "connection started: ${dev.whitespc.roam.diagnostics.LogStore.redactStreamUrl(url)}")
         }
 
         override fun onConnectionSuccess() {
@@ -235,13 +234,11 @@ class StreamingEngine(private val context: Context) {
             if (Prefs.recordWhileStreaming(context) && !stream.isRecording) {
                 startRecordSafe()
             }
-            if (wasReconnecting || pendingVisualRestore) {
-                // The encoder pipeline restarted under the GL chain (reconnect,
-                // or the severe-heat resolution step-down), which can drop
-                // filter textures: the broadcast side comes back with no
+            if (wasReconnecting) {
+                // The encoder pipeline restarted under the GL chain, which can
+                // drop filter textures: the broadcast side comes back with no
                 // watermark/overlays even though the preview still shows them.
                 // Rebuild visuals on the main thread, same as background-resume.
-                pendingVisualRestore = false
                 engineScope.launch(Dispatchers.Main) { restoreBroadcastVisuals() }
             }
         }
@@ -644,6 +641,11 @@ class StreamingEngine(private val context: Context) {
 
     private var recordTickCounter = 0
 
+    /** Path of the file RootEncoder is currently writing to. Cleared after we
+     *  finalize it into public Movies, so a failed/abandoned recording on the
+     *  next start can be detected and not double-finalized. */
+    private var currentRecordPath: String? = null
+
     private val recordListener = object : RecordController.Listener {
         override fun onStatusChange(status: RecordController.Status) {
             Log.d(TAG, "record status: $status")
@@ -658,6 +660,8 @@ class StreamingEngine(private val context: Context) {
             Log.w(TAG, "record error", e)
             runCatching { if (stream.isRecording) stream.stopRecord() }
             _isRecording.value = false
+            currentRecordPath?.let { finalizeRecording(it) }
+            currentRecordPath = null
             _recordNotice.value = "Recording failed and stopped. The stream is not affected."
         }
     }
@@ -681,7 +685,9 @@ class StreamingEngine(private val context: Context) {
         val name = "roam-" +
             SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date()) + ".mp4"
         recordTickCounter = 0
-        runCatching { stream.startRecord(File(dir, name).absolutePath, listener = recordListener) }
+        val path = File(dir, name).absolutePath
+        runCatching { stream.startRecord(path, listener = recordListener) }
+            .onSuccess { currentRecordPath = path }
             .onFailure {
                 Log.w(TAG, "startRecord failed", it)
                 _recordNotice.value = "Couldn't start recording. The stream is not affected."
@@ -692,6 +698,47 @@ class StreamingEngine(private val context: Context) {
         runCatching { if (stream.isRecording) stream.stopRecord() }
             .onFailure { Log.w(TAG, "stopRecord failed", it) }
         _isRecording.value = false
+        val path = currentRecordPath
+        currentRecordPath = null
+        if (path != null) finalizeRecording(path)
+    }
+
+    /** Copy the just-recorded file from app-private Movies to the public
+     *  Movies/Roam folder via MediaStore so it shows up in Gallery/Files like
+     *  any normal video. App-private path is invisible to the Files app on
+     *  Android 11+. Runs on IO, never blocks the stream thread. */
+    private fun finalizeRecording(privatePath: String) {
+        engineScope.launch(Dispatchers.IO) {
+            runCatching {
+                val privateFile = File(privatePath)
+                if (!privateFile.exists() || privateFile.length() == 0L) return@runCatching
+                val values = ContentValues().apply {
+                    put(MediaStore.Video.Media.DISPLAY_NAME, privateFile.name)
+                    put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                    put(
+                        MediaStore.Video.Media.RELATIVE_PATH,
+                        "${Environment.DIRECTORY_MOVIES}/Roam",
+                    )
+                    put(MediaStore.Video.Media.IS_PENDING, 1)
+                }
+                val resolver = context.contentResolver
+                val uri = resolver.insert(
+                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                    values,
+                ) ?: return@runCatching
+                resolver.openOutputStream(uri)?.use { os ->
+                    privateFile.inputStream().use { it.copyTo(os) }
+                } ?: run {
+                    resolver.delete(uri, null, null)
+                    return@runCatching
+                }
+                values.clear()
+                values.put(MediaStore.Video.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+                privateFile.delete()
+                Log.d(TAG, "recording finalized to Movies/Roam/${privateFile.name}")
+            }.onFailure { Log.w(TAG, "finalize recording failed", it) }
+        }
     }
 
     /** Called once a second from onNewBitrate; roughly once a minute while
@@ -753,13 +800,34 @@ class StreamingEngine(private val context: Context) {
             runCatching { srtStreamClient?.setLatency(SRT_LATENCY_MS) }
         }
         liveStartMs = SystemClock.elapsedRealtime()
+        // Clear any leftover heat banner from a previous session. The thermal
+        // handler is dormant while idle, so a "phone hot" banner from an
+        // earlier stream stays on screen otherwise even when the phone is fine.
+        _thermalNotice.value = null
         _state.value = StreamState.Connecting
+        startHeadroomLogger()
         runCatching { stream.startStream(cleanUrl) }
             .onFailure { t ->
                 Log.w(TAG, "startStream threw", t)
                 _state.value = StreamState.Error(t.message ?: "Stream start failed")
                 wantStreaming = false
             }
+    }
+
+    private fun startHeadroomLogger() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        val pm = powerManager ?: return
+        headroomLoggerJob?.cancel()
+        headroomLoggerJob = engineScope.launch {
+            while (isActive) {
+                val headroom = runCatching { pm.getThermalHeadroom(0) }.getOrNull()
+                val status = runCatching { pm.currentThermalStatus }.getOrNull()
+                if (headroom != null && !headroom.isNaN()) {
+                    Log.d(TAG, "thermal headroom=${"%.2f".format(headroom)} status=$status")
+                }
+                delay(30_000L)
+            }
+        }
     }
 
     fun stop() {
@@ -770,17 +838,12 @@ class StreamingEngine(private val context: Context) {
         isReconnecting = false
         criticalStopJob?.cancel()
         criticalStopJob = null
+        headroomLoggerJob?.cancel()
+        headroomLoggerJob = null
         liveStartMs = null
         stopRecordSafe()
         runCatching { if (stream.isStreaming) stream.stopStream() }
         _state.value = StreamState.Idle
-        // If severe heat stepped the encode down mid-stream, restore the
-        // user's configured resolution now that we're idle. syncConfig
-        // re-prepares from prefs (it no-ops while streaming, so this is safe).
-        if (heatDowngradedResolution) {
-            heatDowngradedResolution = false
-            engineScope.launch(Dispatchers.Main) { runCatching { syncConfig(context) } }
-        }
     }
 
     fun release() {
@@ -965,6 +1028,17 @@ class StreamingEngine(private val context: Context) {
                 cam.disableOpticalVideoStabilization()
             }
         }.onFailure { Log.w(TAG, "stabilization apply failed", it) }
+    }
+
+    /** Setting moved to off: kill dual cam now if it was running, so the HUD
+     *  button disappearing and the camera staying alive don't disagree. No-op
+     *  when the setting moves to on — the user still has to tap the HUD button
+     *  to actually enable it. */
+    fun setDualCamSettingEnabled(enabled: Boolean) {
+        if (!enabled && isDualCamOn.value) {
+            if (mainFacingFront && _isTorchOn.value) _isTorchOn.value = false
+            dualCamera.disable()
+        }
     }
 
     fun toggleDualCam() {
@@ -1206,16 +1280,29 @@ class StreamingEngine(private val context: Context) {
                 val cap = (configuredBitrate * 0.7).toInt()
                 thermalCapBps = cap
                 applyBitrateCeiling()
-                _thermalNotice.value = "Phone warming, bitrate capped at ${cap / 1000} kbps"
+                _thermalNotice.value =
+                    "Heat warning: bitrate capped at ${cap / 1000} kbps"
             }
             PowerManager.THERMAL_STATUS_SEVERE -> {
                 val cap = (configuredBitrate * 0.4).toInt()
                 thermalCapBps = cap
                 applyBitrateCeiling()
-                _thermalNotice.value =
-                    "Phone hot, bitrate capped at ${cap / 1000} kbps. " +
-                        "Stealth mode (screen off) helps it cool."
-                maybeStepDownResolutionForHeat()
+                // Dual cam is the dominant heat driver (test 4 reached SEVERE
+                // in 24 min with it as the only extra load). Killing it on
+                // SEVERE gave ~0.07 headroom relief in our data. Resolution
+                // step-down was tried but split the stream into separate VODs
+                // on Twitch for ~0.02 of extra relief; not worth the UX hit.
+                val wasDualCam = isDualCamOn.value
+                if (wasDualCam) {
+                    engineScope.launch(Dispatchers.Main) {
+                        dualCamera.disableAndAwait()
+                    }
+                }
+                _thermalNotice.value = if (wasDualCam) {
+                    "Heat warning: dual cam stopped, bitrate capped at ${cap / 1000} kbps"
+                } else {
+                    "Heat warning: bitrate capped at ${cap / 1000} kbps"
+                }
             }
             PowerManager.THERMAL_STATUS_CRITICAL,
             PowerManager.THERMAL_STATUS_EMERGENCY,
@@ -1223,66 +1310,21 @@ class StreamingEngine(private val context: Context) {
                 if (criticalStopJob == null) {
                     _stealthRequested.value = true
                     _thermalNotice.value =
-                        "Critical heat: screen going dark to cool. The stream " +
-                            "stops in ${CRITICAL_HEAT_GRACE_MS / 1000} s unless " +
-                            "the phone cools."
+                        "Heat critical: stream stops in " +
+                            "${CRITICAL_HEAT_GRACE_MS / 1000}s unless it cools"
                     criticalStopJob = engineScope.launch {
                         delay(CRITICAL_HEAT_GRACE_MS)
                         criticalStopJob = null
                         val still = powerManager?.currentThermalStatus
                             ?: PowerManager.THERMAL_STATUS_CRITICAL
                         if (still >= PowerManager.THERMAL_STATUS_CRITICAL && stream.isStreaming) {
-                            _thermalNotice.value = "Phone too hot, stream stopped"
+                            _thermalNotice.value = "Heat critical: stream stopped"
                             stop()
                         }
                     }
                 }
             }
             else -> Unit
-        }
-    }
-
-    /** SEVERE-heat escalation beyond bitrate: re-prepare the encoder at 480p.
-     *  Fewer pixels cuts encoder load far harder than starving the same pixel
-     *  count of bits. Costs a deliberate 1-3 s broadcast blip (stop stream,
-     *  re-prepare, restart through the same path as a reconnect), which beats
-     *  the alternative further up this slope: the stream dying. One-shot per
-     *  stream; full resolution returns when the stream stops. A live recording
-     *  is split across the change (muxers can't switch resolution mid-file). */
-    private fun maybeStepDownResolutionForHeat() {
-        if (heatDowngradedResolution) return
-        if (preparedHeight <= HEAT_FALLBACK_HEIGHT) return
-        if (!stream.isStreaming || !wantStreaming) return
-        val url = lastStreamUrl ?: return
-        val view = currentView ?: return
-        heatDowngradedResolution = true
-        engineScope.launch(Dispatchers.Main) {
-            runCatching {
-                Log.d(TAG, "severe heat: stepping encode down to 480p")
-                val wasRecording = stream.isRecording
-                if (wasRecording) stopRecordSafe()
-                if (stream.isStreaming) stream.stopStream()
-                if (stream.isOnPreview) stream.stopPreview()
-                val videoOk = stream.prepareVideo(
-                    HEAT_FALLBACK_WIDTH,
-                    HEAT_FALLBACK_HEIGHT,
-                    effectiveMaxBitrateBps(),
-                    preparedFps,
-                    VIDEO_GOP_SECONDS,
-                )
-                val audioOk = stream.prepareAudio(AUDIO_SAMPLE_RATE, AUDIO_STEREO, AUDIO_BITRATE)
-                if (videoOk && audioOk) {
-                    preparedWidth = HEAT_FALLBACK_WIDTH
-                    preparedHeight = HEAT_FALLBACK_HEIGHT
-                }
-                stream.startPreview(view)
-                pendingVisualRestore = true
-                stream.startStream(url)
-                // Recording restarts (as a new file) via onConnectionSuccess.
-                _thermalNotice.value =
-                    "Phone hot: dropped to 480p to cool the encoder. " +
-                        "Full resolution returns next stream."
-            }.onFailure { Log.w(TAG, "heat resolution step-down failed", it) }
         }
     }
 }

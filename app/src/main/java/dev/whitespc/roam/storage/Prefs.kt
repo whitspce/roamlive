@@ -35,6 +35,7 @@ object Prefs {
     private const val KEY_BRB_IMAGE_PATH = "brb_image_path"
     private const val KEY_AUTO_BITRATE = "auto_bitrate"
     private const val KEY_RECORD_WHILE_STREAMING = "record_while_streaming"
+    private const val KEY_DUAL_CAM_ENABLED = "dual_cam_enabled"
 
     private const val DEFAULT_BRB_TEXT = "BE RIGHT BACK"
     private const val DEFAULT_STEALTH_PULSE_SEC = 30
@@ -139,6 +140,19 @@ object Prefs {
 
     fun setRecordWhileStreaming(context: Context, enabled: Boolean) {
         sp(context).edit().putBoolean(KEY_RECORD_WHILE_STREAMING, enabled).apply()
+    }
+
+    /** Dual camera: shows a picture-in-picture from the other-facing camera
+     *  while streaming. Off by default — both camera sensors running at once
+     *  is the single largest heat source in the app (test 4 confirmed
+     *  SEVERE-thermal in ~25 min with this as the only extra load). Gated
+     *  behind a deliberate opt-in in Settings; only when on does the dual-cam
+     *  HUD button appear. */
+    fun dualCamEnabled(context: Context): Boolean =
+        sp(context).getBoolean(KEY_DUAL_CAM_ENABLED, false)
+
+    fun setDualCamEnabled(context: Context, enabled: Boolean) {
+        sp(context).edit().putBoolean(KEY_DUAL_CAM_ENABLED, enabled).apply()
     }
 
     fun chatEnabled(context: Context): Boolean =

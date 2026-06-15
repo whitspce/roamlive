@@ -27,6 +27,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Edit
+import android.widget.Toast
+import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Lock
@@ -103,6 +106,7 @@ fun SettingsScreen(
     onApplyAutoBitrate: (Boolean) -> Unit,
     onApplyRecording: (Boolean) -> Unit,
     onApplyStabilization: () -> Unit,
+    onApplyDualCam: (Boolean) -> Unit,
     onClose: () -> Unit,
     onOpenOverlays: () -> Unit,
 ) {
@@ -135,6 +139,7 @@ fun SettingsScreen(
     var stealthPulseSec by remember { mutableIntStateOf(Prefs.stealthPulseSeconds(context)) }
     var maxReconnectMin by remember { mutableIntStateOf(Prefs.maxReconnectMinutes(context)) }
     var stabilizationEnabled by remember { mutableStateOf(Prefs.stabilizationEnabled(context)) }
+    var dualCamEnabled by remember { mutableStateOf(Prefs.dualCamEnabled(context)) }
 
     LaunchedEffect(streamUrl) { Prefs.setStreamUrl(context, streamUrl) }
     LaunchedEffect(resolutionIndex) {
@@ -198,6 +203,10 @@ fun SettingsScreen(
     LaunchedEffect(stabilizationEnabled) {
         Prefs.setStabilizationEnabled(context, stabilizationEnabled)
         onApplyStabilization()
+    }
+    LaunchedEffect(dualCamEnabled) {
+        Prefs.setDualCamEnabled(context, dualCamEnabled)
+        onApplyDualCam(dualCamEnabled)
     }
 
     Column(
@@ -322,6 +331,17 @@ fun SettingsScreen(
                     checked = stabilizationEnabled,
                     onCheckedChange = { stabilizationEnabled = it },
                 )
+                Spacer(modifier = Modifier.height(12.dp))
+                ToggleRow(
+                    label = "Dual camera",
+                    description = "Allows you to show front camera and rear " +
+                        "camera at the same time. Warning: this is very " +
+                        "resource intensive and will heat up the phone " +
+                        "quickly. When on, a dual-cam button appears in the " +
+                        "stream HUD.",
+                    checked = dualCamEnabled,
+                    onCheckedChange = { dualCamEnabled = it },
+                )
             }
             // Not section-locked: Quality is mixed — resolution/fps lock while live
             // but bitrate stays editable, so the per-control greying carries it and
@@ -380,8 +400,9 @@ fun SettingsScreen(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Recordings land in Android/data/dev.whitespc.roam/" +
-                        "files/Movies. Open them with the Files app, or over USB.",
+                    text = "Recordings land in Movies/Roam on the phone. " +
+                        "They show up in the Gallery and Files apps like any " +
+                        "other video.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 11.sp,
                 )
@@ -648,6 +669,56 @@ fun SettingsScreen(
                     )
                 }
             }
+            Section(title = "Diagnostics") {
+                val ctx = context
+                Row(verticalAlignment = Alignment.Top) {
+                    Icon(
+                        imageVector = Icons.Filled.BugReport,
+                        contentDescription = null,
+                        tint = RoamLive,
+                        modifier = Modifier.size(22.dp).padding(top = 2.dp),
+                    )
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Text(
+                        text = "A rolling text log of what the engine did. Useful for bug " +
+                            "reports or sharing with Elliot for field-test analysis. The " +
+                            "stream key is never included.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                    )
+                }
+                // Save to Downloads — direct file save, easy to find in Files app.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            val filename = dev.whitespc.roam.diagnostics.LogStore
+                                .saveToDownloads(ctx)
+                            val msg = if (filename != null) {
+                                "Saved to Downloads / $filename"
+                            } else {
+                                "Couldn't save the log file."
+                            }
+                            Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+                        }
+                        .padding(vertical = 8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Download,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onBackground,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Text(
+                        text = "Save logs to Downloads",
+                        color = MaterialTheme.colorScheme.onBackground,
+                        fontSize = 14.sp,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
             Section(title = "Support") {
                 LinkRow(
                     icon = Icons.Filled.Favorite,
@@ -725,12 +796,19 @@ private fun ToggleRow(
                 fontSize = 12.sp,
             )
         }
+        // Use the brand green for ON and an explicit muted gray for OFF so the
+        // two states read distinctly at a glance — Material's defaults in dark
+        // theme made on/off look too similar in field testing.
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
             colors = SwitchDefaults.colors(
-                checkedThumbColor = MaterialTheme.colorScheme.primary,
-                checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f),
+                checkedThumbColor = RoamLive,
+                checkedTrackColor = RoamLive.copy(alpha = 0.35f),
+                checkedBorderColor = RoamLive,
+                uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
+                uncheckedBorderColor = MaterialTheme.colorScheme.outline,
             ),
         )
     }

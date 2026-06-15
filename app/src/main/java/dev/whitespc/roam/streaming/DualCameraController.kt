@@ -2,7 +2,7 @@ package dev.whitespc.roam.streaming
 
 import android.content.Context
 import android.graphics.SurfaceTexture
-import android.util.Log
+import dev.whitespc.roam.diagnostics.RoamLog as Log
 import com.pedro.encoder.input.gl.render.filters.`object`.SurfaceFilterRender
 import com.pedro.encoder.input.sources.video.Camera2Source
 import com.pedro.encoder.utils.gl.TranslateTo
@@ -81,6 +81,13 @@ class DualCameraController(
         controllerScope.launch {
             opMutex.withLock { disableInternal() }
         }
+    }
+
+    /** Awaitable variant for callers (the heat step-down) that must rebuild the
+     *  underlying stream right after — they need PiP resources fully released
+     *  before they re-prepare the encoder. */
+    suspend fun disableAndAwait() {
+        opMutex.withLock { disableInternal() }
     }
 
     /**

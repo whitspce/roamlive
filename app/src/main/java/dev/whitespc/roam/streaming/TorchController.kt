@@ -4,7 +4,7 @@ import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
-import android.util.Log
+import dev.whitespc.roam.diagnostics.RoamLog as Log
 
 private const val TAG = "RoamTorch"
 

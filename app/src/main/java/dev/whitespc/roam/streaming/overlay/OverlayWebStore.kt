@@ -3,7 +3,7 @@ package dev.whitespc.roam.streaming.overlay
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
-import android.util.Log
+import dev.whitespc.roam.diagnostics.RoamLog as Log
 import java.io.File
 import java.util.UUID
 import java.util.zip.ZipInputStream

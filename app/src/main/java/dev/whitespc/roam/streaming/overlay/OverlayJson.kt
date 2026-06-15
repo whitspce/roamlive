@@ -1,6 +1,6 @@
 package dev.whitespc.roam.streaming.overlay
 
-import android.util.Log
+import dev.whitespc.roam.diagnostics.RoamLog as Log
 import org.json.JSONArray
 import org.json.JSONObject
 

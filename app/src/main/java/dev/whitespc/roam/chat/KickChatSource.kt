@@ -1,12 +1,11 @@
 package dev.whitespc.roam.chat
 
 import android.graphics.Color
-import android.util.Log
+import dev.whitespc.roam.diagnostics.RoamLog as Log
 import dev.whitespc.roam.NetworkMonitor
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -14,6 +13,7 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -49,21 +49,23 @@ class KickChatSource(private val channelName: String) : ChatSource {
 
     override suspend fun connect() {
         Log.d(TAG, "connect() entered for channel '$channelName'")
-        var attempt = 0
+        var failureStreak = 0
         while (currentCoroutineContext().isActive) {
-            attempt++
+            failureStreak++
             val chatroomId = fetchChatroomId(channelName)
             if (chatroomId == null) {
-                Log.w(TAG, "chatroom fetch failed for $channelName (attempt $attempt)")
+                Log.w(TAG, "chatroom fetch failed for $channelName (attempt $failureStreak)")
                 if (!currentCoroutineContext().isActive) return
                 NetworkMonitor.isAvailable.filter { it }.first()
                 if (!currentCoroutineContext().isActive) return
-                delay(if (attempt <= 3) 1000L else 5000L)
+                val backoffMs = nextBackoffMs(failureStreak)
+                withTimeoutOrNull(backoffMs) { NetworkMonitor.onAvailable.first() }
                 continue
             }
-            Log.d(TAG, "connecting ws for chatroom $chatroomId (attempt $attempt)")
+            Log.d(TAG, "connecting ws for chatroom $chatroomId (attempt $failureStreak)")
             val closed = CompletableDeferred<Unit>()
-            val ws = openWebSocket(chatroomId, closed)
+            val opened = CompletableDeferred<Unit>()
+            val ws = openWebSocket(chatroomId, closed, opened)
             webSocket = ws
             try {
                 closed.await()
@@ -73,9 +75,13 @@ class KickChatSource(private val channelName: String) : ChatSource {
                 webSocket = null
             }
             if (!currentCoroutineContext().isActive) return
+            // Reset backoff if we actually got onOpen — the next failure is a
+            // new problem, not the same flake we were backing off from.
+            if (opened.isCompleted) failureStreak = 0
             NetworkMonitor.isAvailable.filter { it }.first()
             if (!currentCoroutineContext().isActive) return
-            delay(if (attempt <= 3) 1000L else 5000L)
+            val backoffMs = nextBackoffMs(failureStreak)
+            withTimeoutOrNull(backoffMs) { NetworkMonitor.onAvailable.first() }
         }
     }
 
@@ -107,7 +113,11 @@ class KickChatSource(private val channelName: String) : ChatSource {
         }
     }
 
-    private fun openWebSocket(chatroomId: Long, closed: CompletableDeferred<Unit>): WebSocket {
+    private fun openWebSocket(
+        chatroomId: Long,
+        closed: CompletableDeferred<Unit>,
+        opened: CompletableDeferred<Unit>,
+    ): WebSocket {
         val request = Request.Builder()
             .url(PUSHER_URL)
             .header("User-Agent", USER_AGENT)
@@ -115,6 +125,7 @@ class KickChatSource(private val channelName: String) : ChatSource {
         return httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 Log.d(TAG, "ws onOpen (${response.code})")
+                opened.complete(Unit)
                 ws.send(
                     """{"event":"pusher:subscribe","data":{"channel":"chatrooms.$chatroomId.v2"}}""",
                 )

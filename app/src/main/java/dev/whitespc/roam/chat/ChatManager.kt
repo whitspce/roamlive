@@ -1,6 +1,6 @@
 package dev.whitespc.roam.chat
 
-import android.util.Log
+import dev.whitespc.roam.diagnostics.RoamLog as Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job

@@ -1,6 +1,6 @@
 package dev.whitespc.roam.streaming
 
-import android.util.Log
+import dev.whitespc.roam.diagnostics.RoamLog as Log
 
 private const val TAG = "RoamAutoBitrate"
 

@@ -2,7 +2,7 @@ package dev.whitespc.roam.streaming.overlay
 
 import android.content.Context
 import android.graphics.BitmapFactory
-import android.util.Log
+import dev.whitespc.roam.diagnostics.RoamLog as Log
 import com.pedro.encoder.input.gl.render.filters.BaseFilterRender
 import com.pedro.encoder.input.gl.render.filters.`object`.BaseObjectFilterRender
 import com.pedro.encoder.input.gl.render.filters.`object`.ImageObjectFilterRender

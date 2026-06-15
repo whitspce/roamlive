@@ -1,6 +1,6 @@
 package dev.whitespc.roam.streaming
 
-import android.util.Log
+import dev.whitespc.roam.diagnostics.RoamLog as Log
 import com.pedro.encoder.input.gl.render.filters.`object`.SurfaceFilterRender
 
 private const val TAG = "RoamSafeSurfaceFilter"

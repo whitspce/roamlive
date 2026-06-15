@@ -9,7 +9,7 @@ import android.hardware.display.VirtualDisplay
 import android.os.Handler
 import android.os.Looper
 import android.util.DisplayMetrics
-import android.util.Log
+import dev.whitespc.roam.diagnostics.RoamLog as Log
 import android.view.Surface
 import android.view.ViewGroup
 import android.webkit.WebView

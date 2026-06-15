@@ -3,7 +3,7 @@ package dev.whitespc.roam.streaming.overlay
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.net.Uri
-import android.util.Log
+import dev.whitespc.roam.diagnostics.RoamLog as Log
 import java.io.File
 import java.util.UUID
 

@@ -1,7 +1,8 @@
 package dev.whitespc.roam
 
 import android.app.Application
-import android.util.Log
+import dev.whitespc.roam.diagnostics.LogStore
+import dev.whitespc.roam.diagnostics.RoamLog as Log
 import java.io.IOException
 
 private const val TAG = "RoamApplication"
@@ -10,6 +11,10 @@ class RoamApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // First: any subsequent Log.* in this method (or anywhere) routes
+        // through RoamLog to LogStore. Initialising before the other steps
+        // guarantees we capture their setup logs too.
+        LogStore.init(this)
         installNetworkCrashGuard()
         NetworkMonitor.init(this)
     }

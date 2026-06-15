@@ -3,7 +3,7 @@ package dev.whitespc.roam.streaming
 import android.content.Context
 import android.hardware.camera2.CameraManager
 import android.os.Build
-import android.util.Log
+import dev.whitespc.roam.diagnostics.RoamLog as Log
 
 private const val TAG = "RoamDualCamSupport"
 
