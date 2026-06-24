@@ -36,6 +36,13 @@ object Prefs {
     private const val KEY_AUTO_BITRATE = "auto_bitrate"
     private const val KEY_RECORD_WHILE_STREAMING = "record_while_streaming"
     private const val KEY_DUAL_CAM_ENABLED = "dual_cam_enabled"
+    private const val KEY_AUDIO_METER_ENABLED = "audio_meter_enabled"
+    private const val KEY_OBS_HOST = "obs_host"
+    private const val KEY_OBS_PORT = "obs_port"
+    private const val KEY_OBS_PASSWORD = "obs_password"
+    private const val KEY_OBS_BRB_SCENE = "obs_brb_scene"
+    private const val KEY_OBS_SYNC_STREAMING = "obs_sync_streaming"
+    private const val KEY_MIC_GAIN = "mic_gain"
 
     private const val DEFAULT_BRB_TEXT = "BE RIGHT BACK"
     private const val DEFAULT_STEALTH_PULSE_SEC = 30
@@ -153,6 +160,78 @@ object Prefs {
 
     fun setDualCamEnabled(context: Context, enabled: Boolean) {
         sp(context).edit().putBoolean(KEY_DUAL_CAM_ENABLED, enabled).apply()
+    }
+
+    /** HUD audio level meter: a 4-segment bar that lights up with the current
+     *  mic peak so a streamer can see the mic is alive without hearing it.
+     *  Off by default — it's diagnostic, not core to the broadcast — but
+     *  costs effectively zero (peeks at PCM samples already in memory) so
+     *  no heat or battery warning needed. */
+    fun audioMeterEnabled(context: Context): Boolean =
+        sp(context).getBoolean(KEY_AUDIO_METER_ENABLED, false)
+
+    fun setAudioMeterEnabled(context: Context, enabled: Boolean) {
+        sp(context).edit().putBoolean(KEY_AUDIO_METER_ENABLED, enabled).apply()
+    }
+
+    /** OBS WebSocket pairing. Host is the LAN IP or hostname of the machine
+     *  running OBS; port defaults to OBS's default (4455); password is
+     *  whatever OBS shows under Tools -> WebSocket Server Settings. Stored
+     *  plain in shared prefs — same posture as the chat channel names. If we
+     *  ever decide OBS passwords are sensitive enough to deserve Keystore
+     *  wrapping (like the stream URL), we can move them with no UI change. */
+    fun obsHost(context: Context): String =
+        sp(context).getString(KEY_OBS_HOST, "") ?: ""
+
+    fun setObsHost(context: Context, host: String) {
+        sp(context).edit().putString(KEY_OBS_HOST, host).apply()
+    }
+
+    fun obsPort(context: Context): Int =
+        sp(context).getInt(KEY_OBS_PORT, 4455)
+
+    fun setObsPort(context: Context, port: Int) {
+        sp(context).edit().putInt(KEY_OBS_PORT, port).apply()
+    }
+
+    fun obsPassword(context: Context): String =
+        sp(context).getString(KEY_OBS_PASSWORD, "") ?: ""
+
+    fun setObsPassword(context: Context, password: String) {
+        sp(context).edit().putString(KEY_OBS_PASSWORD, password).apply()
+    }
+
+    /** Name of the OBS scene the HUD BRB icon switches to when OBS is paired.
+     *  When blank, or when OBS isn't paired, BRB falls back to the phone-side
+     *  BRB image overlay. The autocompletes in Settings come from the live
+     *  scene list fetched after pairing. */
+    fun obsBrbScene(context: Context): String =
+        sp(context).getString(KEY_OBS_BRB_SCENE, "") ?: ""
+
+    fun setObsBrbScene(context: Context, name: String) {
+        sp(context).edit().putString(KEY_OBS_BRB_SCENE, name).apply()
+    }
+
+    /** When on (default), Roam tells the paired OBS to Start Streaming when
+     *  Roam goes live and Stop Streaming when Roam ends. Turn off if you
+     *  control OBS's broadcast lifecycle separately (e.g. you're streaming to
+     *  multiple OBS-managed destinations and don't want Roam touching it). */
+    fun obsSyncStreaming(context: Context): Boolean =
+        sp(context).getBoolean(KEY_OBS_SYNC_STREAMING, true)
+
+    fun setObsSyncStreaming(context: Context, enabled: Boolean) {
+        sp(context).edit().putBoolean(KEY_OBS_SYNC_STREAMING, enabled).apply()
+    }
+
+    /** Microphone input gain. 1.0 is unity (untouched), <1 is quieter,
+     *  >1 amplifies. RootEncoder's MicrophoneSource clamps internally, so
+     *  we don't have to. Live-adjustable from the HUD mic panel; the slider
+     *  in Settings → Audio sets the default the engine picks up on start. */
+    fun micGain(context: Context): Float =
+        sp(context).getFloat(KEY_MIC_GAIN, 1.0f)
+
+    fun setMicGain(context: Context, value: Float) {
+        sp(context).edit().putFloat(KEY_MIC_GAIN, value).apply()
     }
 
     fun chatEnabled(context: Context): Boolean =

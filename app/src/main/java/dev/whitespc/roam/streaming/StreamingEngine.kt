@@ -2,6 +2,9 @@ package dev.whitespc.roam.streaming
 
 import android.content.ContentValues
 import android.content.Context
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
+import android.media.MediaRecorder
 import android.graphics.Color as AndroidColor
 import android.os.Build
 import android.os.PowerManager
@@ -25,7 +28,10 @@ import com.pedro.library.util.streamclient.GenericStreamClient
 import com.pedro.library.util.streamclient.SrtStreamClient
 import com.pedro.library.view.OpenGlView
 import dev.whitespc.roam.NetworkMonitor
+import dev.whitespc.roam.audio.AudioMeter
+import dev.whitespc.roam.audio.MicDevice
 import dev.whitespc.roam.audio.MicDevices
+import dev.whitespc.roam.audio.MicPreviewReader
 import dev.whitespc.roam.storage.Prefs
 import dev.whitespc.roam.streaming.overlay.OverlayRenderer
 import kotlinx.coroutines.CompletableDeferred
@@ -381,6 +387,38 @@ class StreamingEngine(private val context: Context) {
     private var preparedMicName: String? = null
     private var preparedMicType: Int? = null
 
+    /** True while we're routing audio through a Bluetooth SCO link (the only
+     *  way to capture from a BT headset mic on Android). Tracked so a switch
+     *  to a non-BT mic can release SCO cleanly, and release() can tear it
+     *  down on engine shutdown. */
+    private var scoActive = false
+
+    /** Source-agnostic audio level state for the HUD meter. Fed by the
+     *  streaming source's CustomAudioEffect when live, and by [micPreviewReader]
+     *  when not — so the meter works during setup as well as during a stream. */
+    private val audioMeter = AudioMeter()
+    val audioLevel: StateFlow<Float> = audioMeter.level
+
+    /** Pre-live mic reader: opens its own AudioRecord so the meter has data to
+     *  show before the encoder is running. Started/stopped via [refreshMeter]
+     *  based on (a) the meter setting and (b) whether a stream is active. */
+    private val micPreviewReader = MicPreviewReader { audioMeter.feed(it) }
+    private var meterDesired = false
+
+    /** True when the user wants the meter on but the selected mic is Bluetooth
+     *  and we're not yet streaming. Pre-live BT metering is intentionally
+     *  skipped (SCO routing belongs to the streaming path), so the HUD shows
+     *  an honest note instead of bars that would be misleadingly reading the
+     *  built-in mic. Cleared once streaming starts. */
+    private val _meterPreLiveUnavailable = MutableStateFlow(false)
+    val meterPreLiveUnavailable: StateFlow<Boolean> = _meterPreLiveUnavailable.asStateFlow()
+
+    init {
+        runCatching {
+            (stream.audioSource as? MicrophoneSource)?.setAudioEffect(audioMeter.Effect())
+        }.onFailure { Log.w(TAG, "audio meter install failed", it) }
+    }
+
     init {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && thermalListener != null) {
             powerManager?.addThermalStatusListener(thermalListener)
@@ -452,6 +490,7 @@ class StreamingEngine(private val context: Context) {
             preparedFps = fps
             preparedBitrate = bitrate
             applyPreferredMic(context)
+            setMicGain(Prefs.micGain(context))
         }
         if (stream.isOnPreview) stream.stopPreview()
         stream.startPreview(view)
@@ -520,11 +559,30 @@ class StreamingEngine(private val context: Context) {
     /** Apply the user's preferred mic if one is picked and currently present. If the
      *  saved device isn't plugged in, the resolver returns null and we leave the
      *  system default in place. Records what we applied so syncConfig can detect a
-     *  later change. */
+     *  later change. Bluetooth headset mics need an SCO link activated before
+     *  AudioRecord can capture from them — without this the picker selects the
+     *  device but AudioRecord pulls silence (the bug surfaced by AirPods Pro). */
     private fun applyPreferredMic(context: Context) {
         val name = Prefs.micDeviceName(context)
         val type = Prefs.micDeviceType(context)
         val micDevice = MicDevices.find(context, name, type)
+        routeBluetoothSco(context, micDevice)
+        // BT_SCO routing only takes effect on AudioRecord.AudioSource.VOICE_COMMUNICATION
+        // (per Android's own setCommunicationDevice docs); MIC silently ignores the
+        // routing. Switch the underlying source accordingly. The AudioRecord is
+        // created at MicrophoneSource.start() time, so this matters most pre-live.
+        val want = if (micDevice?.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) {
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION
+        } else {
+            MediaRecorder.AudioSource.MIC
+        }
+        runCatching {
+            val mic = stream.audioSource as? MicrophoneSource
+            if (mic != null && mic.audioSource != want) {
+                Log.d(TAG, "switching MicrophoneSource.audioSource ${mic.audioSource}->$want")
+                mic.audioSource = want
+            }
+        }.onFailure { Log.w(TAG, "setAudioSource failed", it) }
         if (micDevice != null) {
             runCatching {
                 (stream.audioSource as? MicrophoneSource)?.setPreferredDevice(micDevice.info)
@@ -532,6 +590,149 @@ class StreamingEngine(private val context: Context) {
         }
         preparedMicName = name
         preparedMicType = type
+    }
+
+    /** Activate or release the Bluetooth SCO link based on whether [device] is a
+     *  BT headset. SCO is the bidirectional audio profile (mono, voice codec) —
+     *  the ONLY profile that carries the BT mic's audio back to the phone.
+     *  A2DP, which is what plays music to the headset, doesn't have a mic path.
+     *
+     *  API 31+ uses [AudioManager.setCommunicationDevice]; pre-31 falls back to
+     *  the deprecated SCO calls. Pre-31 also needs MODE_IN_COMMUNICATION for
+     *  the routing to actually take effect; restoring MODE_NORMAL on release. */
+    private fun routeBluetoothSco(context: Context, device: MicDevice?) {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        val wantSco = device?.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+        if (wantSco == scoActive) return
+        runCatching {
+            if (wantSco) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val target = device!!.info
+                    // Diagnostic: what does Android think is even available as a
+                    // comm device right now? AirPods routing has been broken in
+                    // testing; this tells us whether the OS sees them at all,
+                    // whether our target id is in the list, and whether the call
+                    // succeeded.
+                    val available = am.availableCommunicationDevices
+                    Log.d(
+                        TAG,
+                        "SCO route: target id=${target.id} type=${target.type} " +
+                            "product='${target.productName}'; available=${
+                                available.joinToString { "id=${it.id} type=${it.type}" }
+                            }",
+                    )
+                    val matched = available.firstOrNull { it.id == target.id }
+                        ?: available.firstOrNull { it.type == target.type }
+                    if (matched == null) {
+                        Log.w(TAG, "SCO route: target not in availableCommunicationDevices")
+                    } else {
+                        val ok = am.setCommunicationDevice(matched)
+                        Log.d(
+                            TAG,
+                            "SCO route: setCommunicationDevice id=${matched.id} returned=$ok " +
+                                "active-after=${am.communicationDevice?.id}",
+                        )
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    am.mode = AudioManager.MODE_IN_COMMUNICATION
+                    @Suppress("DEPRECATION")
+                    am.startBluetoothSco()
+                    @Suppress("DEPRECATION")
+                    am.isBluetoothScoOn = true
+                    Log.d(TAG, "SCO route: legacy startBluetoothSco invoked")
+                }
+                scoActive = true
+            } else {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    am.clearCommunicationDevice()
+                    Log.d(TAG, "SCO route: clearCommunicationDevice")
+                } else {
+                    @Suppress("DEPRECATION")
+                    am.isBluetoothScoOn = false
+                    @Suppress("DEPRECATION")
+                    am.stopBluetoothSco()
+                    @Suppress("DEPRECATION")
+                    am.mode = AudioManager.MODE_NORMAL
+                    Log.d(TAG, "SCO route: legacy stopBluetoothSco")
+                }
+                scoActive = false
+            }
+        }.onFailure { Log.w(TAG, "BT SCO routing failed (wantSco=$wantSco)", it) }
+    }
+
+    /** Live-safe entrypoint for the Settings mic picker. Reads the saved mic
+     *  pref and applies it now, including establishing or releasing BT SCO,
+     *  whether the engine is idle or mid-stream. The mic picker used to be
+     *  locked while streaming as a precaution; unlocking it means a streamer
+     *  whose mic battery dies mid-stream can switch to the built-in mic
+     *  without stopping the broadcast. */
+    fun applyMicDevicePref(context: Context) {
+        // Detect the mid-stream Bluetooth case before re-routing. The
+        // streaming AudioRecord is locked to its initial audio source, so the
+        // switch to VOICE_COMMUNICATION inside applyPreferredMic doesn't take
+        // effect on the currently-running stream — we surface a banner so the
+        // user knows to restart.
+        val pickedIsBt = MicDevices
+            .find(context, Prefs.micDeviceName(context), Prefs.micDeviceType(context))
+            ?.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+        val midStream = wantStreaming
+        applyPreferredMic(context)
+        if (pickedIsBt && midStream) {
+            _micNotice.value =
+                "Bluetooth mic takes effect on the next stream. Stop and " +
+                    "restart to switch."
+        } else {
+            _micNotice.value = null
+        }
+        // When idle, the preview reader needs to re-route to the new device
+        // (or hand off to the BT-unavailable state). No-op while streaming.
+        refreshMeter()
+    }
+
+    /** Live-safe mic input gain. 1.0 is unity, lower is quieter, higher
+     *  amplifies. RootEncoder applies it to the AudioRecord stream so it
+     *  takes effect immediately whether the stream is live or idle. */
+    fun setMicGain(value: Float) {
+        runCatching {
+            (stream.audioSource as? MicrophoneSource)?.microphoneVolume = value
+        }.onFailure { Log.w(TAG, "setMicGain failed", it) }
+    }
+
+    /** Toggle the HUD audio meter. When on we run the pre-live mic reader so
+     *  the bar shows activity before the stream starts; once streaming, the
+     *  reader stops and the encoder-side effect tap takes over. Idempotent. */
+    fun setAudioMeterDesired(desired: Boolean) {
+        if (meterDesired == desired) return
+        meterDesired = desired
+        refreshMeter()
+    }
+
+    private fun refreshMeter() {
+        // Use [wantStreaming] (set synchronously at start()) rather than
+        // stream.isStreaming (set async after the encoder actually connects)
+        // so refreshMeter() called from inside start() sees the right state.
+        val shouldPreview = meterDesired && !wantStreaming
+        if (!shouldPreview) {
+            micPreviewReader.stop()
+            _meterPreLiveUnavailable.value = false
+            if (!meterDesired) audioMeter.reset()
+            return
+        }
+        // Resolve the user's picked mic. Bluetooth is skipped pre-live (see
+        // [meterPreLiveUnavailable]); for everything else we hand the device
+        // to the reader so the meter reads from the right input.
+        val name = Prefs.micDeviceName(context)
+        val type = Prefs.micDeviceType(context)
+        val picked = MicDevices.find(context, name, type)
+        if (picked != null && picked.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) {
+            micPreviewReader.stop()
+            audioMeter.reset()
+            _meterPreLiveUnavailable.value = true
+            return
+        }
+        _meterPreLiveUnavailable.value = false
+        micPreviewReader.start(picked?.info)
     }
 
     /** Re-apply settings that changed while idle. Settings now draws on top of the
@@ -637,6 +838,16 @@ class StreamingEngine(private val context: Context) {
 
     fun dismissRecordNotice() {
         _recordNotice.value = null
+    }
+
+    /** One-line notices about mic changes that the user should know about but
+     *  the engine handled silently (e.g. mid-stream Bluetooth pick that needs
+     *  the next stream to take effect). Same shape as [recordNotice]. */
+    private val _micNotice = MutableStateFlow<String?>(null)
+    val micNotice: StateFlow<String?> = _micNotice.asStateFlow()
+
+    fun dismissMicNotice() {
+        _micNotice.value = null
     }
 
     private var recordTickCounter = 0
@@ -804,8 +1015,12 @@ class StreamingEngine(private val context: Context) {
         // handler is dormant while idle, so a "phone hot" banner from an
         // earlier stream stays on screen otherwise even when the phone is fine.
         _thermalNotice.value = null
+        _micNotice.value = null
         _state.value = StreamState.Connecting
         startHeadroomLogger()
+        // Hand the mic over to the encoder; preview reader would compete for
+        // the AudioRecord slot otherwise.
+        refreshMeter()
         runCatching { stream.startStream(cleanUrl) }
             .onFailure { t ->
                 Log.w(TAG, "startStream threw", t)
@@ -844,6 +1059,9 @@ class StreamingEngine(private val context: Context) {
         stopRecordSafe()
         runCatching { if (stream.isStreaming) stream.stopStream() }
         _state.value = StreamState.Idle
+        // Stream's done with the mic; resume pre-live metering if the user
+        // still wants it.
+        refreshMeter()
     }
 
     fun release() {
@@ -862,6 +1080,9 @@ class StreamingEngine(private val context: Context) {
         stopRecordSafe()
         runCatching { if (stream.isStreaming) stream.stopStream() }
         if (stream.isOnPreview) stream.stopPreview()
+        // Release any held SCO link so the system isn't left in MODE_IN_COMMUNICATION.
+        if (scoActive) routeBluetoothSco(context, null)
+        micPreviewReader.release()
         engineScope.cancel()
     }
 

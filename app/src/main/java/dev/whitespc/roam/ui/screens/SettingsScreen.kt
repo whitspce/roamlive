@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -35,6 +36,8 @@ import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -43,6 +46,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -50,7 +55,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -82,6 +89,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.rememberCoroutineScope
 import dev.whitespc.roam.audio.MicDevices
 import dev.whitespc.roam.chat.ChatManager
+import dev.whitespc.roam.obs.ObsClient
+import dev.whitespc.roam.obs.ObsConnectionState
 import dev.whitespc.roam.storage.Prefs
 import dev.whitespc.roam.streaming.overlay.OverlayImageStore
 import dev.whitespc.roam.ui.theme.RoamLive
@@ -107,6 +116,9 @@ fun SettingsScreen(
     onApplyRecording: (Boolean) -> Unit,
     onApplyStabilization: () -> Unit,
     onApplyDualCam: (Boolean) -> Unit,
+    onApplyMicDevice: () -> Unit,
+    onApplyAudioMeter: (Boolean) -> Unit,
+    onApplyMicGain: (Float) -> Unit,
     onClose: () -> Unit,
     onOpenOverlays: () -> Unit,
 ) {
@@ -140,6 +152,15 @@ fun SettingsScreen(
     var maxReconnectMin by remember { mutableIntStateOf(Prefs.maxReconnectMinutes(context)) }
     var stabilizationEnabled by remember { mutableStateOf(Prefs.stabilizationEnabled(context)) }
     var dualCamEnabled by remember { mutableStateOf(Prefs.dualCamEnabled(context)) }
+    var audioMeterEnabled by remember { mutableStateOf(Prefs.audioMeterEnabled(context)) }
+    var micGain by remember { mutableFloatStateOf(Prefs.micGain(context)) }
+    var obsHost by remember { mutableStateOf(Prefs.obsHost(context)) }
+    var obsPortText by remember { mutableStateOf(Prefs.obsPort(context).toString()) }
+    var obsPassword by remember { mutableStateOf(Prefs.obsPassword(context)) }
+    var obsBrbScene by remember { mutableStateOf(Prefs.obsBrbScene(context)) }
+    var obsSyncStreaming by remember { mutableStateOf(Prefs.obsSyncStreaming(context)) }
+    val obsState by ObsClient.state.collectAsState()
+    val obsScenes by ObsClient.scenes.collectAsState()
 
     LaunchedEffect(streamUrl) { Prefs.setStreamUrl(context, streamUrl) }
     LaunchedEffect(resolutionIndex) {
@@ -208,6 +229,21 @@ fun SettingsScreen(
         Prefs.setDualCamEnabled(context, dualCamEnabled)
         onApplyDualCam(dualCamEnabled)
     }
+    LaunchedEffect(audioMeterEnabled) {
+        Prefs.setAudioMeterEnabled(context, audioMeterEnabled)
+        onApplyAudioMeter(audioMeterEnabled)
+    }
+    LaunchedEffect(micGain) {
+        Prefs.setMicGain(context, micGain)
+        onApplyMicGain(micGain)
+    }
+    LaunchedEffect(obsHost) { Prefs.setObsHost(context, obsHost) }
+    LaunchedEffect(obsPortText) {
+        obsPortText.toIntOrNull()?.let { Prefs.setObsPort(context, it) }
+    }
+    LaunchedEffect(obsPassword) { Prefs.setObsPassword(context, obsPassword) }
+    LaunchedEffect(obsBrbScene) { Prefs.setObsBrbScene(context, obsBrbScene) }
+    LaunchedEffect(obsSyncStreaming) { Prefs.setObsSyncStreaming(context, obsSyncStreaming) }
 
     Column(
         modifier = Modifier
@@ -269,10 +305,14 @@ fun SettingsScreen(
                     url = "https://kick.com/dashboard",
                 )
             }
-            Section(title = "Microphone", locked = isLive) {
+            Section(title = "Audio") {
+                SubHeading("Microphone")
                 Text(
                     text = "Pick the mic Roam records from. USB and wired mics " +
-                        "sound best; Bluetooth uses a lower-quality voice codec.",
+                        "sound best. Bluetooth headsets use a phone-call voice " +
+                        "codec (mono, 8-16 kHz) which sounds noticeably worse " +
+                        "than the built-in mic - they're a backup, not the " +
+                        "recommended option.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
                 )
@@ -297,8 +337,9 @@ fun SettingsScreen(
                         onClick = {
                             micKey = null
                             Prefs.setMicDevice(context, null, null)
+                            onApplyMicDevice()
                         },
-                        enabled = !isLive,
+                        enabled = true,
                     )
                     micDevices.forEach { d ->
                         val key = "${d.type}|${d.productName}"
@@ -308,20 +349,51 @@ fun SettingsScreen(
                             onClick = {
                                 micKey = key
                                 Prefs.setMicDevice(context, d.productName, d.type)
+                                onApplyMicDevice()
                             },
-                            enabled = !isLive,
+                            enabled = true,
                         )
                     }
                 }
-                Text(
-                    text = if (isLive) {
-                        "Can't change the mic while you're live. Stop the stream first."
-                    } else {
-                        "Applies when you return to the stream screen."
-                    },
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 11.sp,
+                Spacer(modifier = Modifier.height(12.dp))
+                ToggleRow(
+                    label = "Show audio level on HUD",
+                    description = "4 bar meter that lights up to show mic " +
+                        "level. Helps you visualise if your mic is picking " +
+                        "up sound.",
+                    checked = audioMeterEnabled,
+                    onCheckedChange = { audioMeterEnabled = it },
                 )
+                Spacer(modifier = Modifier.height(16.dp))
+                SubHeading("Input gain")
+                Text(
+                    text = "100% is unity (untouched). Below 100% quiets the " +
+                        "mic; above 100% amplifies (which also amplifies " +
+                        "hiss). Live-adjustable from the HUD by tapping the " +
+                        "audio meter pill.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "${(micGain * 100).toInt()}%",
+                        color = MaterialTheme.colorScheme.onBackground,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.width(56.dp),
+                    )
+                    Slider(
+                        value = micGain,
+                        onValueChange = { micGain = it },
+                        valueRange = 0f..2f,
+                        modifier = Modifier.weight(1f),
+                        colors = SliderDefaults.colors(
+                            thumbColor = RoamLive,
+                            activeTrackColor = RoamLive.copy(alpha = 0.6f),
+                        ),
+                    )
+                }
             }
             Section(title = "Camera") {
                 ToggleRow(
@@ -493,28 +565,114 @@ fun SettingsScreen(
                     }
                 }
             }
-            Section(title = "Chat panel") {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        FieldLabel("Show chat panel")
-                        Text(
-                            text = "Visible only on this phone, never sent into your broadcast.",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 12.sp,
+            Section(title = "OBS") {
+                Text(
+                    text = "Optional. Pair Roam with an OBS Studio running on " +
+                        "your home PC (or wherever) to remote-control its " +
+                        "scenes from the HUD. Streaming itself still goes " +
+                        "through the stream URL above — OBS is the controller, " +
+                        "not a separate destination. Enable WebSocket in OBS " +
+                        "under Tools > WebSocket Server Settings, then fill in " +
+                        "the same host, port, and password here.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                LabeledField(
+                    label = "Host (LAN IP or hostname)",
+                    value = obsHost,
+                    onValueChange = { obsHost = it.trim() },
+                    placeholder = "192.168.1.42",
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                LabeledField(
+                    label = "Port",
+                    value = obsPortText,
+                    onValueChange = { obsPortText = it.filter(Char::isDigit) },
+                    placeholder = "4455",
+                    keyboardType = KeyboardType.Number,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                LabeledField(
+                    label = "Password",
+                    value = obsPassword,
+                    onValueChange = { obsPassword = it },
+                    placeholder = "from Tools > WebSocket Server Settings",
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                ObsConnectionRow(
+                    state = obsState,
+                    onConnect = {
+                        ObsClient.connect(
+                            host = obsHost,
+                            port = obsPortText.toIntOrNull() ?: 4455,
+                            password = obsPassword,
                         )
-                    }
-                    Switch(
-                        checked = chatEnabled,
-                        onCheckedChange = { chatEnabled = it },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = MaterialTheme.colorScheme.primary,
-                            checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f),
-                        ),
+                    },
+                    onDisconnect = { ObsClient.disconnect() },
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                ToggleRow(
+                    label = "Sync OBS streaming with Roam",
+                    description = "When Roam goes live, OBS starts streaming " +
+                        "too. When Roam ends, OBS stops. Saves walking to " +
+                        "your PC twice every session. Turn off if you " +
+                        "control OBS's broadcast on your own.",
+                    checked = obsSyncStreaming,
+                    onCheckedChange = { obsSyncStreaming = it },
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                SubHeading("BRB scene")
+                Text(
+                    text = "When OBS is paired, the HUD BRB button switches to " +
+                        "this scene instead of showing the phone-side BRB image. " +
+                        "Tap BRB again to switch back to the previous scene. " +
+                        "Leave blank to keep BRB on the phone-side image only.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                LabeledField(
+                    label = "Scene name",
+                    value = obsBrbScene,
+                    onValueChange = { obsBrbScene = it },
+                    placeholder = "BRB",
+                )
+                if (obsScenes.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Available scenes (tap to use):",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp,
                     )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                    ) {
+                        obsScenes.forEach { name ->
+                            FilterChip(
+                                selected = name == obsBrbScene,
+                                onClick = { obsBrbScene = name },
+                                label = { Text(name) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = RoamLive.copy(alpha = 0.25f),
+                                    selectedLabelColor = MaterialTheme.colorScheme.onBackground,
+                                ),
+                            )
+                        }
+                    }
                 }
+            }
+            Section(title = "Chat panel") {
+                ToggleRow(
+                    label = "Show chat panel",
+                    description = "Visible only on this phone, never sent into your broadcast.",
+                    checked = chatEnabled,
+                    onCheckedChange = { chatEnabled = it },
+                )
                 Spacer(modifier = Modifier.height(8.dp))
                 LabeledField(
                     label = "Kick channel name",
@@ -796,9 +954,9 @@ private fun ToggleRow(
                 fontSize = 12.sp,
             )
         }
-        // Use the brand green for ON and an explicit muted gray for OFF so the
-        // two states read distinctly at a glance — Material's defaults in dark
-        // theme made on/off look too similar in field testing.
+        // Use the brand colour for ON and an explicit muted gray for OFF so the
+        // two states read distinctly at a glance. Material's dark-theme defaults
+        // made on/off look too similar in field testing.
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
@@ -837,6 +995,19 @@ private fun TopBar(onClose: () -> Unit) {
             fontWeight = FontWeight.Medium,
         )
     }
+}
+
+/** Smaller heading for grouping controls within a [Section] (e.g. the
+ *  Microphone group inside the Audio section). No divider, no uppercase,
+ *  one visual step down from the section heading. */
+@Composable
+private fun SubHeading(text: String) {
+    Text(
+        text = text,
+        color = MaterialTheme.colorScheme.onBackground,
+        fontSize = 13.sp,
+        fontWeight = FontWeight.SemiBold,
+    )
 }
 
 @Composable
@@ -930,6 +1101,55 @@ private fun LabeledField(
             ),
             modifier = Modifier.fillMaxWidth(),
         )
+    }
+}
+
+/** Status row for the OBS pairing: shows the current connection state in
+ *  plain English plus a single Connect / Disconnect button. Keeps the UI
+ *  honest about what's happening (connecting / error message / etc.) instead
+ *  of just toggling a switch that hides state. */
+@Composable
+private fun ObsConnectionRow(
+    state: ObsConnectionState,
+    onConnect: () -> Unit,
+    onDisconnect: () -> Unit,
+) {
+    val (label, dotColor) = when (state) {
+        ObsConnectionState.Disconnected -> "Not connected" to MaterialTheme.colorScheme.outline
+        ObsConnectionState.Connecting -> "Connecting..." to Color(0xFFE8B43A)
+        is ObsConnectionState.Connected ->
+            "Connected (rpc v${state.rpcVersion})" to Color(0xFF53FC18)
+        is ObsConnectionState.Error -> "Error: ${state.message}" to Color(0xFFFF2D2D)
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(dotColor),
+        )
+        Text(
+            text = label,
+            color = MaterialTheme.colorScheme.onBackground,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f),
+        )
+        val isConnected = state is ObsConnectionState.Connected ||
+            state is ObsConnectionState.Connecting
+        Button(
+            onClick = if (isConnected) onDisconnect else onConnect,
+            shape = RoundedCornerShape(10.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+            ),
+        ) {
+            Text(text = if (isConnected) "Disconnect" else "Connect")
+        }
     }
 }
 

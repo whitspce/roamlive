@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Allow cleartext (ws://, http://) connections. We need this because the OBS
+  WebSocket protocol is plain ws:// by default and users pair Roam with their
+  home OBS over LAN where TLS would be a setup nightmare. All our other
+  network traffic is already TLS/secure (Twitch + Kick chat are wss://, the
+  Kick HTTP API is https://, RTMP and SRT have their own protocol-level
+  security or run on private networks). So in practice enabling cleartext
+  doesn't expose anything we'd otherwise have done over TLS.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
