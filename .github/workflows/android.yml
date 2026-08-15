@@ -55,4 +55,5 @@ jobs:
             :srt:lintDebug \
             :srt:lintRelease \
             :app:assembleDebug \
-            :app:assembleRelease
+            :app:assembleRelease \
+            :app:bundleRelease
