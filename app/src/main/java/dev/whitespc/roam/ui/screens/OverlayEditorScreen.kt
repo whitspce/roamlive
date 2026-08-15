@@ -1289,10 +1289,13 @@ private fun GpsTokenWarningDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) 
         title = { Text("This overlay uses GPS") },
         text = {
             Text(
-                "One of your overlays uses a GPS-backed value (speed, " +
-                    "altitude, location, or city). GPS needs the location " +
-                    "permission and adds real battery and heat cost while " +
-                    "you're streaming.\n\n" +
+                "Roam accesses live location while this GPS overlay is " +
+                    "enabled to produce the selected speed, altitude, " +
+                    "location, city, or heading value. Roam does not store a " +
+                    "location history. GPS adds real battery and heat cost.\n\n" +
+                    "A visible GPS value becomes part of the video sent to " +
+                    "your streaming destination and viewers. A city lookup " +
+                    "may send coordinates to your device's geocoding provider.\n\n" +
                     "The next prompt is Android asking you to allow location. " +
                     "\"While using the app\" is enough. During an active " +
                     "stream, location can continue when Roam is not on screen " +
