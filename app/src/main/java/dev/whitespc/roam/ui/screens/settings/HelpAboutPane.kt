@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.PrivacyTip
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.Icon
@@ -248,6 +249,12 @@ internal fun HelpAboutPane() {
             label = "Help and feedback",
             description = "Guides, known issues, and ways to get in touch.",
             url = "https://roamlive.app/support",
+        )
+        LinkRow(
+            icon = Icons.Filled.PrivacyTip,
+            label = "Privacy policy",
+            description = "How Roam handles streaming, location, diagnostics, and local data.",
+            url = "https://roamlive.app/privacy/",
         )
         if (versionName != null) {
             Spacer(modifier = Modifier.height(8.dp))

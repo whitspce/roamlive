@@ -1294,8 +1294,11 @@ private fun GpsTokenWarningDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) 
                     "permission and adds real battery and heat cost while " +
                     "you're streaming.\n\n" +
                     "The next prompt is Android asking you to allow location. " +
-                    "\"While using the app\" is enough; Roam never uses " +
-                    "location in the background. Approximate location works, " +
+                    "\"While using the app\" is enough. During an active " +
+                    "stream, location can continue when Roam is not on screen " +
+                    "so the overlay stays current. Android shows the active " +
+                    "stream notification, and Roam stops location when the " +
+                    "stream or GPS overlay stops. Approximate location works, " +
                     "but speed, altitude, and heading may be unavailable unless " +
                     "you choose precise location.\n\n" +
                     "Skip to save without GPS (the tokens will show \"-\" " +
