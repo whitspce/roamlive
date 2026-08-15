@@ -33,7 +33,7 @@ jobs:
 
       - name: Install Android SDK packages
         run: >-
-          sdkmanager --install
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install
           "platforms;android-37.0"
           "build-tools;36.0.0"
 
