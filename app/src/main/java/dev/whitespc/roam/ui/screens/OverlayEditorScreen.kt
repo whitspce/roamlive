@@ -1,0 +1,1341 @@
+package dev.whitespc.roam.ui.screens
+
+import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import dev.whitespc.roam.R
+import dev.whitespc.roam.storage.Prefs
+import dev.whitespc.roam.streaming.overlay.OverlayImageStore
+import dev.whitespc.roam.streaming.overlay.OverlayItem
+import dev.whitespc.roam.streaming.overlay.OverlaySource
+import dev.whitespc.roam.streaming.overlay.OverlayTokens
+import dev.whitespc.roam.streaming.overlay.OverlayWebStore
+import dev.whitespc.roam.streaming.overlay.Scene
+import dev.whitespc.roam.ui.theme.RoamLive
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.UUID
+import kotlin.math.roundToInt
+
+// The nine anchor presets, as (label, x, y) on the 0 to 100 position scale
+// (0 = flush start edge, 50 = centred, 100 = flush end edge). Quick jumps; the
+// X/Y sliders fine-tune from there.
+private val ANCHORS = listOf(
+    Triple("TL", 0f, 0f), Triple("T", 50f, 0f), Triple("TR", 100f, 0f),
+    Triple("L", 0f, 50f), Triple("C", 50f, 50f), Triple("R", 100f, 50f),
+    Triple("BL", 0f, 100f), Triple("B", 50f, 100f), Triple("BR", 100f, 100f),
+)
+
+private val CANVAS_NAVY = Color(0xFF13243F)
+
+// Preset text colors (ARGB).
+private val TEXT_COLOURS = listOf(
+    0xFFFFFFFF, 0xFF000000, 0xFFFF2D2D, 0xFFFFD23A,
+    0xFF53FC18, 0xFF3AC8FF, 0xFFFF7A3A, 0xFFB46BFF,
+).map { it.toInt() }
+
+private const val TEXT_SIZE_MIN = 12f
+private const val TEXT_SIZE_MAX = 144f
+private const val IMAGE_SIZE_MIN = 5f
+// Past 100% the image bleeds beyond the frame - wanted for full-frame overlay
+// graphics (a Twitch-style frame) and for images that aren't exactly 16:9.
+private const val IMAGE_SIZE_MAX = 150f
+
+@Composable
+fun OverlayEditorScreen(
+    onClose: () -> Unit,
+    onApplyScene: () -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val cleanupScope = LocalLifecycleOwner.current.lifecycleScope
+
+    var draft by remember { mutableStateOf(Prefs.overlayScene(context)) }
+    val importedImages = remember { LinkedHashSet<String>() }
+    val importedWebSources = remember { LinkedHashSet<String>() }
+    var selectedId by remember { mutableStateOf<String?>(null) }
+    var showWebWarning by remember { mutableStateOf(false) }
+    var showGpsWarning by remember { mutableStateOf(false) }
+    var showInvalidWebAddress by remember { mutableStateOf(false) }
+    // Brief "Saved" feedback on the save button so save-and-stay is visibly
+    // confirmed - without it, hitting Save with no close looks like nothing
+    // happened.
+    var justSaved by remember { mutableStateOf(false) }
+    LaunchedEffect(justSaved) {
+        if (justSaved) {
+            delay(1500)
+            justSaved = false
+        }
+    }
+    val selected = draft.items.firstOrNull { it.id == selectedId }
+
+    val frameAspect = remember {
+        Prefs.videoWidth(context).toFloat() / Prefs.videoHeight(context).coerceAtLeast(1)
+    }
+
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val path = withContext(Dispatchers.IO) { OverlayImageStore.importImage(context, uri) }
+                ?: return@launch
+            importedImages += path
+            val aspect = withContext(Dispatchers.IO) { OverlayImageStore.aspectRatio(path) }
+            val width = 25f
+            val item = OverlayItem(
+                id = UUID.randomUUID().toString(),
+                source = OverlaySource.Image(path, aspect),
+                xPercent = 50f,
+                yPercent = 50f,
+                widthPercent = width,
+                heightPercent = OverlayImageStore.imageHeightPercent(width, aspect, frameAspect),
+                zOrder = nextZOrder(draft),
+            )
+            draft = draft.copy(items = draft.items + item)
+            selectedId = item.id
+        }
+    }
+
+    val webFilePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val id = selectedId ?: return@rememberLauncherForActivityResult
+        scope.launch {
+            val fileUrl = withContext(Dispatchers.IO) { OverlayWebStore.importLocal(context, uri) }
+                ?: return@launch
+            importedWebSources += fileUrl
+            draft = draft.mapItem(id) { current ->
+                val src = current.source
+                if (src is OverlaySource.WebPage) {
+                    current.copy(source = src.copy(url = fileUrl))
+                } else {
+                    current
+                }
+            }
+        }
+    }
+
+    // Permission launcher used when a save touches a GPS-backed token and the
+    // location permission isn't granted yet. We save regardless of the user's
+    // decision; if they deny, GPS tokens just render as "-" until they
+    // grant later. Granting also lets TokenSource activate GPS on the next
+    // applyScene (which fires when the editor closes).
+    // Persist the draft, push the new scene to the live engine so the broadcast
+    // updates immediately, and flash the "Saved" feedback. Stays in the editor
+    // so the user can keep adding overlays without re-entering each time. The
+    // back arrow is what closes.
+    fun saveAndStay() {
+        val previous = Prefs.overlayScene(context)
+        val normalized = draft.normalizeWebAddresses()
+        val removedAssets = removedAssets(
+            previous = previous,
+            next = normalized,
+            importedImages = importedImages,
+            importedWebSources = importedWebSources,
+        )
+        importedImages.clear()
+        importedWebSources.clear()
+        draft = normalized
+        Prefs.setOverlayScene(context, normalized)
+        onApplyScene()
+        justSaved = true
+        cleanupScope.launch(Dispatchers.IO) {
+            removedAssets.images.forEach { OverlayImageStore.deleteImage(context, it) }
+            removedAssets.webSources.forEach { OverlayWebStore.delete(context, it) }
+        }
+    }
+
+    fun sceneNeedsGps(): Boolean = draft.items.any { item ->
+        item.visible &&
+            (item.source as? OverlaySource.Text)?.text
+                ?.let { OverlayTokens.hasGpsToken(it) } == true
+    }
+
+    val locationPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { _ ->
+        saveAndStay()
+    }
+
+    fun requestLocationPermission() {
+        locationPermLauncher.launch(
+            arrayOf(
+                android.Manifest.permission.ACCESS_COARSE_LOCATION,
+                android.Manifest.permission.ACCESS_FINE_LOCATION,
+            ),
+        )
+    }
+
+    fun handleSave() {
+        if (!draft.hasOnlySupportedWebSources(context)) {
+            showInvalidWebAddress = true
+            return
+        }
+        if (!sceneNeedsGps()) {
+            saveAndStay()
+            return
+        }
+        val hasPerm = listOf(
+            android.Manifest.permission.ACCESS_FINE_LOCATION,
+            android.Manifest.permission.ACCESS_COARSE_LOCATION,
+        ).any { permission ->
+            ContextCompat.checkSelfPermission(context, permission) ==
+                PackageManager.PERMISSION_GRANTED
+        }
+        if (hasPerm) {
+            saveAndStay()
+            return
+        }
+        if (Prefs.gpsTokenWarningSeen(context)) {
+            // Already informed; jump straight to the system prompt.
+            requestLocationPermission()
+        } else {
+            // First-time cost dialog before the permission prompt - the FAQ
+            // does the long form; this is the in-app heads-up moment.
+            showGpsWarning = true
+        }
+    }
+
+    // Adds a blank-URL web overlay (full-frame) and selects it for editing.
+    fun addWebOverlay() {
+        val item = OverlayItem(
+            id = UUID.randomUUID().toString(),
+            source = OverlaySource.WebPage(""),
+            xPercent = 50f,
+            yPercent = 50f,
+            widthPercent = 100f,
+            heightPercent = 100f,
+            zOrder = nextZOrder(draft),
+        )
+        draft = draft.copy(items = draft.items + item)
+        selectedId = item.id
+    }
+
+    fun closeEditor() {
+        val savedAssets = sceneAssets(Prefs.overlayScene(context))
+        val abandonedImages = importedImages.filterNot(savedAssets.images::contains)
+        val abandonedWeb = importedWebSources.filterNot(savedAssets.webSources::contains)
+        importedImages.clear()
+        importedWebSources.clear()
+        cleanupScope.launch(Dispatchers.IO) {
+            abandonedImages.forEach { OverlayImageStore.deleteImage(context, it) }
+            abandonedWeb.forEach { OverlayWebStore.delete(context, it) }
+        }
+        onClose()
+    }
+
+    BackHandler(onBack = ::closeEditor)
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .windowInsetsPadding(WindowInsets.systemBars),
+    ) {
+        EditorTopBar(
+            onCancel = ::closeEditor,
+            onSave = { handleSave() },
+            justSaved = justSaved,
+        )
+        Row(modifier = Modifier.fillMaxSize()) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .padding(start = 20.dp, end = 12.dp, top = 4.dp, bottom = 20.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                EditorCanvas(scene = draft, selectedId = selectedId)
+            }
+            Column(
+                modifier = Modifier
+                    .width(300.dp)
+                    .fillMaxHeight()
+                    .verticalScroll(rememberScrollState())
+                    .padding(end = 20.dp, top = 4.dp, bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                OverlayList(
+                    scene = draft,
+                    selectedId = selectedId,
+                    onSelect = { selectedId = it },
+                    onToggleVisible = { id ->
+                        draft = draft.mapItem(id) { it.copy(visible = !it.visible) }
+                    },
+                    onMove = { id, up -> draft = draft.moveItem(id, up) },
+                    onAddText = {
+                        val item = OverlayItem(
+                            id = UUID.randomUUID().toString(),
+                            source = OverlaySource.Text("New text"),
+                            xPercent = 50f,
+                            yPercent = 50f,
+                            widthPercent = 40f,
+                            heightPercent = 12f,
+                            zOrder = nextZOrder(draft),
+                        )
+                        draft = draft.copy(items = draft.items + item)
+                        selectedId = item.id
+                    },
+                    onAddImage = {
+                        imagePicker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                        )
+                    },
+                    onAddWeb = {
+                        // Show the cost notice on every add for now - keeps the
+                        // battery/heat tradeoff front of mind. One extra tap.
+                        showWebWarning = true
+                    },
+                )
+                if (selected != null) {
+                    SelectedItemControls(
+                        item = selected,
+                        frameAspect = frameAspect,
+                        onChange = { updated -> draft = draft.mapItem(updated.id) { updated } },
+                        onImportWebFile = { webFilePicker.launch(arrayOf("*/*")) },
+                        onDelete = {
+                            draft = draft.copy(items = draft.items.filter { it.id != selected.id })
+                            selectedId = null
+                        },
+                    )
+                }
+            }
+        }
+
+        if (showWebWarning) {
+            WebOverlayWarningDialog(
+                onConfirm = {
+                    showWebWarning = false
+                    addWebOverlay()
+                },
+                onDismiss = { showWebWarning = false },
+            )
+        }
+
+        if (showGpsWarning) {
+            GpsTokenWarningDialog(
+                onConfirm = {
+                    showGpsWarning = false
+                    Prefs.setGpsTokenWarningSeen(context, true)
+                    requestLocationPermission()
+                },
+                onDismiss = {
+                    // Backed out of the GPS cost - save without permission so
+                    // the user doesn't lose their edits; GPS tokens will render
+                    // as "-" until they grant the permission later.
+                    showGpsWarning = false
+                    saveAndStay()
+                },
+            )
+        }
+
+        if (showInvalidWebAddress) {
+            AlertDialog(
+                onDismissRequest = { showInvalidWebAddress = false },
+                title = { Text("Use an HTTPS address") },
+                text = {
+                    Text(
+                        "Web overlays accept HTTPS addresses or HTML and ZIP files " +
+                            "imported through the button. Check the selected overlay's address.",
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { showInvalidWebAddress = false }) {
+                        Text("OK")
+                    }
+                },
+            )
+        }
+    }
+}
+
+private data class SceneAssets(
+    val images: Set<String>,
+    val webSources: Set<String>,
+)
+
+private fun sceneAssets(scene: Scene): SceneAssets = SceneAssets(
+    images = scene.items.mapNotNull { (it.source as? OverlaySource.Image)?.path }.toSet(),
+    webSources = scene.items.mapNotNull { item ->
+        (item.source as? OverlaySource.WebPage)?.url
+            ?.takeIf(OverlayWebStore::isLocalUrl)
+    }.toSet(),
+)
+
+private fun removedAssets(
+    previous: Scene,
+    next: Scene,
+    importedImages: Set<String>,
+    importedWebSources: Set<String>,
+): SceneAssets {
+    val previousAssets = sceneAssets(previous)
+    val nextAssets = sceneAssets(next)
+    return SceneAssets(
+        images = (previousAssets.images + importedImages) - nextAssets.images,
+        webSources = (previousAssets.webSources + importedWebSources) - nextAssets.webSources,
+    )
+}
+
+private fun Scene.hasOnlySupportedWebSources(context: android.content.Context): Boolean =
+    items.all { item ->
+        val url = (item.source as? OverlaySource.WebPage)?.url ?: return@all true
+        url.isBlank() || OverlayWebStore.resolveLocal(context, url) != null ||
+            OverlayWebStore.isSafeHttpsUrl(url.trim())
+    }
+
+private fun Scene.normalizeWebAddresses(): Scene = copy(
+    items = items.map { item ->
+        val source = item.source as? OverlaySource.WebPage ?: return@map item
+        if (OverlayWebStore.isLocalUrl(source.url)) item
+        else item.copy(source = source.copy(url = source.url.trim()))
+    },
+)
+
+private fun Scene.mapItem(id: String, transform: (OverlayItem) -> OverlayItem): Scene =
+    copy(items = items.map { if (it.id == id) transform(it) else it })
+
+private fun nextZOrder(scene: Scene): Int {
+    val max = scene.items.maxOfOrNull { it.zOrder } ?: 0
+    // Cap to keep new items just under the watermark's default z (1000) so the
+    // brand mark stays on top out of the box. Users can still move it down
+    // manually with the layer arrows if they want.
+    return (max + 1).coerceAtMost(999)
+}
+
+/**
+ * Swap an item's z-order with its neighbour, moving it [up] (toward the top
+ * layer) or down. Every item is reorderable now, including the watermark.
+ * Returns the scene unchanged if the move isn't valid.
+ */
+private fun Scene.moveItem(id: String, up: Boolean): Scene {
+    // List is shown top-layer-first, so "up" means a higher zOrder.
+    val ordered = items.sortedByDescending { it.zOrder }
+    val idx = ordered.indexOfFirst { it.id == id }
+    if (idx < 0) return this
+    val swapIdx = if (up) idx - 1 else idx + 1
+    if (swapIdx !in ordered.indices) return this
+    val a = ordered[idx]
+    val b = ordered[swapIdx]
+    return copy(
+        items = items.map {
+            when (it.id) {
+                a.id -> it.copy(zOrder = b.zOrder)
+                b.id -> it.copy(zOrder = a.zOrder)
+                else -> it
+            }
+        },
+    )
+}
+
+@Composable
+private fun EditorTopBar(
+    onCancel: () -> Unit,
+    onSave: () -> Unit,
+    justSaved: Boolean,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 8.dp, end = 20.dp, top = 8.dp, bottom = 8.dp),
+    ) {
+        IconButton(onClick = onCancel, modifier = Modifier.size(48.dp)) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = "Close",
+                tint = MaterialTheme.colorScheme.onBackground,
+            )
+        }
+        Spacer(modifier = Modifier.size(8.dp))
+        Text(
+            text = "Overlays",
+            color = MaterialTheme.colorScheme.onBackground,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f),
+        )
+        Surface(
+            onClick = onSave,
+            shape = RoundedCornerShape(8.dp),
+            color = MaterialTheme.colorScheme.primary,
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            ) {
+                if (justSaved) {
+                    Icon(
+                        imageVector = Icons.Filled.Check,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+                Text(
+                    text = if (justSaved) "Saved" else "Save",
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EditorCanvas(scene: Scene, selectedId: String?) {
+    BoxWithConstraints(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center,
+    ) {
+        val containerRatio = maxWidth.value / maxHeight.value
+        val canvasWidth: Dp
+        val canvasHeight: Dp
+        if (containerRatio > 16f / 9f) {
+            canvasHeight = maxHeight
+            canvasWidth = maxHeight * (16f / 9f)
+        } else {
+            canvasWidth = maxWidth
+            canvasHeight = maxWidth * (9f / 16f)
+        }
+        Box(
+            modifier = Modifier
+                .size(canvasWidth, canvasHeight)
+                .clip(RoundedCornerShape(8.dp))
+                .background(CANVAS_NAVY)
+                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+                .padding(6.dp),
+        ) {
+            scene.items
+                .filter { it.visible }
+                .sortedBy { it.zOrder }
+                .forEach { item ->
+                    val alignment = itemAlignment(item)
+                    Box(
+                        modifier = Modifier
+                            .align(alignment)
+                            .then(
+                                if (item.id == selectedId) {
+                                    Modifier.border(1.5.dp, RoamLive, RoundedCornerShape(3.dp))
+                                } else {
+                                    Modifier
+                                },
+                            )
+                            .padding(2.dp),
+                        // An over-100% image is larger than this box; align its
+                        // overflow toward the item's own position so it spills the
+                        // same way the broadcast renders it.
+                        contentAlignment = alignment,
+                    ) {
+                        CanvasItem(item, canvasWidth, canvasHeight)
+                    }
+                }
+        }
+    }
+}
+
+/** Canvas placement for an item, mirroring the renderer exactly. User overlays
+ *  use a precise bias from their 0 to 100 x/y (matches the renderer's
+ *  applyPrecisePosition); the watermark stays on the 3 x 3 snap (matches its
+ *  applyPosition path), so preview and broadcast always agree. */
+private fun itemAlignment(item: OverlayItem): Alignment =
+    if (item.source is OverlaySource.Watermark) {
+        positionToAlignment(item.xPercent, item.yPercent)
+    } else {
+        BiasAlignment(item.xPercent / 50f - 1f, item.yPercent / 50f - 1f)
+    }
+
+/** Maps a centre-coord percent position to the Compose Alignment that mirrors
+ *  RootEncoder's TranslateTo grid. It is kept in lockstep with
+ *  the renderer's snap path. */
+private fun positionToAlignment(x: Float, y: Float): Alignment {
+    val col = when {
+        x < 33f -> 0
+        x > 67f -> 2
+        else -> 1
+    }
+    val row = when {
+        y < 33f -> 0
+        y > 67f -> 2
+        else -> 1
+    }
+    return when (row to col) {
+        0 to 0 -> Alignment.TopStart
+        0 to 1 -> Alignment.TopCenter
+        0 to 2 -> Alignment.TopEnd
+        1 to 0 -> Alignment.CenterStart
+        1 to 1 -> Alignment.Center
+        1 to 2 -> Alignment.CenterEnd
+        2 to 0 -> Alignment.BottomStart
+        2 to 1 -> Alignment.BottomCenter
+        2 to 2 -> Alignment.BottomEnd
+        else -> Alignment.Center
+    }
+}
+
+@Composable
+private fun CanvasItem(item: OverlayItem, canvasWidth: Dp, canvasHeight: Dp) {
+    when (val s = item.source) {
+        is OverlaySource.Text -> {
+            // Scale the editor's text to the canvas the same way the broadcast
+            // scales it to a 720-tall frame, so the preview is proportionate.
+            val previewSp = (s.fontSizeSp * (canvasHeight.value / 720f)).coerceAtLeast(6f)
+            // Resolve {time}/{date} so the preview shows real values; re-resolve
+            // each second when the text carries a live token.
+            var resolved by remember(s.text) { mutableStateOf(OverlayTokens.resolve(s.text)) }
+            if (OverlayTokens.hasToken(s.text)) {
+                LaunchedEffect(s.text) {
+                    while (true) {
+                        delay(1000)
+                        resolved = OverlayTokens.resolve(s.text)
+                    }
+                }
+            }
+            Text(
+                text = resolved.ifBlank { "(empty)" },
+                color = Color(s.colorArgb),
+                fontSize = previewSp.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        OverlaySource.Watermark -> CanvasWatermark(canvasWidth, item.widthPercent)
+        is OverlaySource.Image -> CanvasImage(
+            s.path, canvasWidth, canvasHeight, item.widthPercent, item.heightPercent,
+        )
+        is OverlaySource.WebPage -> CanvasWebPlaceholder(canvasWidth, canvasHeight)
+    }
+}
+
+/** Web overlays render full-frame and the editor can't show the live page, so
+ *  the canvas shows a labelled placeholder filling the frame. */
+@Composable
+private fun CanvasWebPlaceholder(canvasWidth: Dp, canvasHeight: Dp) {
+    Box(
+        modifier = Modifier
+            .size(canvasWidth - 24.dp, canvasHeight - 24.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(RoamLive.copy(alpha = 0.12f))
+            .border(1.5.dp, RoamLive, RoundedCornerShape(6.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Filled.Language,
+                contentDescription = null,
+                tint = RoamLive,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(text = "Web overlay", color = Color.White, fontSize = 11.sp)
+        }
+    }
+}
+
+@Composable
+private fun CanvasWatermark(canvasWidth: Dp, widthPercent: Float) {
+    androidx.compose.foundation.Image(
+        painter = painterResource(R.drawable.watermark),
+        contentDescription = null,
+        modifier = Modifier.width(canvasWidth * (widthPercent / 100f)),
+    )
+}
+
+@Composable
+private fun CanvasImage(
+    path: String,
+    canvasWidth: Dp,
+    canvasHeight: Dp,
+    widthPercent: Float,
+    heightPercent: Float,
+) {
+    val bitmap = remember(path) { BitmapFactory.decodeFile(path)?.asImageBitmap() }
+    if (bitmap != null) {
+        androidx.compose.foundation.Image(
+            bitmap = bitmap,
+            contentDescription = null,
+            contentScale = ContentScale.FillBounds,
+            // requiredSize fixes BOTH dimensions and ignores the canvas
+            // constraints. Sizing only the width let the canvas clamp the
+            // height, and ContentScale then shrank the image back to fit - so
+            // an over-100% image must pin both dimensions to overflow correctly.
+            modifier = Modifier.requiredSize(
+                canvasWidth * (widthPercent / 100f),
+                canvasHeight * (heightPercent / 100f),
+            ),
+        )
+    } else {
+        Text(text = "[image missing]", color = Color.White, fontSize = 10.sp)
+    }
+}
+
+@Composable
+private fun OverlayList(
+    scene: Scene,
+    selectedId: String?,
+    onSelect: (String) -> Unit,
+    onToggleVisible: (String) -> Unit,
+    onMove: (String, Boolean) -> Unit,
+    onAddText: () -> Unit,
+    onAddImage: () -> Unit,
+    onAddWeb: () -> Unit,
+) {
+    val rows = scene.items.sortedByDescending { it.zOrder }
+    // Every item is reorderable now (the locked flag only prevents deletion).
+    val reorderable = rows
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        SectionLabel("Overlays")
+        rows.forEach { item ->
+            val reorderIdx = reorderable.indexOfFirst { it.id == item.id }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .then(
+                        if (item.id == selectedId) {
+                            Modifier.background(MaterialTheme.colorScheme.surfaceVariant)
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .clickable { onSelect(item.id) }
+                    .padding(vertical = 4.dp, horizontal = 4.dp),
+            ) {
+                Checkbox(
+                    checked = item.visible,
+                    onCheckedChange = { _ -> onToggleVisible(item.id) },
+                    colors = CheckboxDefaults.colors(checkedColor = RoamLive),
+                )
+                Text(
+                    text = overlayLabel(item),
+                    color = MaterialTheme.colorScheme.onBackground,
+                    fontSize = 14.sp,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                ReorderArrow(
+                    icon = Icons.Filled.KeyboardArrowUp,
+                    description = "Move up a layer",
+                    enabled = reorderIdx > 0,
+                    onClick = { onMove(item.id, true) },
+                )
+                ReorderArrow(
+                    icon = Icons.Filled.KeyboardArrowDown,
+                    description = "Move down a layer",
+                    enabled = reorderIdx < reorderable.lastIndex,
+                    onClick = { onMove(item.id, false) },
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AddButton(
+                label = "Text",
+                icon = Icons.Filled.TextFields,
+                onClick = onAddText,
+                modifier = Modifier.weight(1f),
+            )
+            AddButton(
+                label = "Image",
+                icon = Icons.Filled.Image,
+                onClick = onAddImage,
+                modifier = Modifier.weight(1f),
+            )
+            AddButton(
+                label = "Web",
+                icon = Icons.Filled.Language,
+                onClick = onAddWeb,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReorderArrow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    description: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.size(32.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = description,
+            tint = if (enabled) {
+                MaterialTheme.colorScheme.onBackground
+            } else {
+                MaterialTheme.colorScheme.outline
+            },
+            modifier = Modifier.size(20.dp),
+        )
+    }
+}
+
+@Composable
+private fun AddButton(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = modifier,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+            modifier = Modifier.padding(vertical = 10.dp),
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onBackground,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = label,
+                color = MaterialTheme.colorScheme.onBackground,
+                fontSize = 14.sp,
+            )
+        }
+    }
+}
+
+/** Shows an imported local web overlay by filename, with a way back to the URL
+ *  field. The managed storage reference is never put in front of the user. */
+@Composable
+private fun ImportedFileRow(fileName: String, onUseUrlInstead: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Filled.UploadFile,
+                contentDescription = null,
+                tint = RoamLive,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = fileName.ifBlank { "imported file" },
+                color = MaterialTheme.colorScheme.onBackground,
+                fontSize = 14.sp,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+        }
+        Text(
+            text = "Imported file",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 12.sp,
+        )
+        TextButton(onClick = onUseUrlInstead) {
+            Text(text = "Use a web address instead", fontSize = 13.sp)
+        }
+    }
+}
+
+private fun overlayLabel(item: OverlayItem): String {
+    if (item.name.isNotBlank()) return item.name
+    return when (val s = item.source) {
+        is OverlaySource.Text -> "Text: ${s.text.take(18).ifBlank { "(empty)" }}"
+        is OverlaySource.Image -> "Image"
+        is OverlaySource.WebPage -> webOverlayLabel(s.url)
+        OverlaySource.Watermark -> "Watermark"
+    }
+}
+
+/** A web overlay's list label: a filename for local content, or its web address. */
+private fun webOverlayLabel(url: String): String = when {
+    url.isBlank() -> "Web: (no URL)"
+    OverlayWebStore.isLocalUrl(url) -> "Web: ${url.substringAfterLast('/')}"
+    else -> "Web: $url"
+}
+
+@Composable
+private fun SelectedItemControls(
+    item: OverlayItem,
+    frameAspect: Float,
+    onChange: (OverlayItem) -> Unit,
+    onImportWebFile: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        SectionLabel("Selected overlay")
+
+        OutlinedTextField(
+            value = item.name,
+            onValueChange = { onChange(item.copy(name = it)) },
+            label = { Text("Name") },
+            placeholder = {
+                Text("Name (optional)", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            },
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        when (val s = item.source) {
+            is OverlaySource.Text -> {
+                // TextFieldValue (not a plain String) so a token can be inserted
+                // at the cursor and the cursor moved after it. Re-keyed on the
+                // item id so switching overlays resets the field.
+                var textField by remember(item.id) {
+                    mutableStateOf(TextFieldValue(s.text, TextRange(s.text.length)))
+                }
+                OutlinedTextField(
+                    value = textField,
+                    onValueChange = {
+                        textField = it
+                        onChange(item.copy(source = s.copy(text = it.text)))
+                    },
+                    label = { Text("Text") },
+                    placeholder = {
+                        Text("Overlay text", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                        unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                TokenChips(
+                    onInsert = { token ->
+                        // Insert at the cursor (replacing any selection) and put
+                        // the cursor right after the inserted token.
+                        val sel = textField.selection
+                        val newText = textField.text.replaceRange(sel.min, sel.max, token)
+                        textField = TextFieldValue(newText, TextRange(sel.min + token.length))
+                        onChange(item.copy(source = s.copy(text = newText)))
+                    },
+                )
+                LabeledSlider(
+                    label = "Text size",
+                    value = s.fontSizeSp,
+                    range = TEXT_SIZE_MIN..TEXT_SIZE_MAX,
+                    onChange = { onChange(item.copy(source = s.copy(fontSizeSp = it))) },
+                )
+                ColourPicker(
+                    selected = s.colorArgb,
+                    onPick = { onChange(item.copy(source = s.copy(colorArgb = it))) },
+                )
+            }
+            is OverlaySource.Image -> {
+                LabeledSlider(
+                    label = "Size",
+                    value = item.widthPercent,
+                    range = IMAGE_SIZE_MIN..IMAGE_SIZE_MAX,
+                    onChange = { newWidth ->
+                        onChange(
+                            item.copy(
+                                widthPercent = newWidth,
+                                heightPercent = OverlayImageStore.imageHeightPercent(
+                                    newWidth, s.aspectRatio, frameAspect,
+                                ),
+                            ),
+                        )
+                    },
+                )
+            }
+            is OverlaySource.WebPage -> {
+                if (OverlayWebStore.isLocalUrl(s.url)) {
+                    ImportedFileRow(
+                        fileName = s.url.substringAfterLast('/'),
+                        onUseUrlInstead = { onChange(item.copy(source = s.copy(url = ""))) },
+                    )
+                } else {
+                    val invalidAddress = s.url.isNotBlank() &&
+                        !OverlayWebStore.isSafeHttpsUrl(s.url.trim())
+                    OutlinedTextField(
+                        value = s.url,
+                        onValueChange = { onChange(item.copy(source = s.copy(url = it))) },
+                        label = { Text("URL") },
+                        placeholder = {
+                            Text("https://...", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        },
+                        singleLine = true,
+                        isError = invalidAddress,
+                        supportingText = if (invalidAddress) {
+                            { Text("Use a complete https:// address") }
+                        } else {
+                            null
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                            unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                AddButton(
+                    label = "Import HTML or ZIP",
+                    icon = Icons.Filled.UploadFile,
+                    onClick = onImportWebFile,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    text = "Web overlays fill the whole frame and run a live page. " +
+                        "They use more battery than text or image overlays.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+            }
+            OverlaySource.Watermark -> Unit
+        }
+
+        if (item.source !is OverlaySource.WebPage) {
+            Text(
+                text = "Position",
+                color = MaterialTheme.colorScheme.onBackground,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            AnchorGrid(
+                current = item.xPercent to item.yPercent,
+                onPick = { (x, y) -> onChange(item.copy(xPercent = x, yPercent = y)) },
+            )
+            LabeledSlider(
+                label = "X",
+                value = item.xPercent,
+                range = 0f..100f,
+                onChange = { onChange(item.copy(xPercent = it)) },
+            )
+            LabeledSlider(
+                label = "Y",
+                value = item.yPercent,
+                range = 0f..100f,
+                onChange = { onChange(item.copy(yPercent = it)) },
+            )
+        }
+
+        // Locked items can't be deleted (e.g. the Roam Live watermark - you can
+        // hide it, move it, rename it, but not remove it).
+        if (!item.locked) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Surface(
+                onClick = onDelete,
+                shape = RoundedCornerShape(8.dp),
+                color = Color.Transparent,
+                border = androidx.compose.foundation.BorderStroke(1.dp, RoamLive),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(vertical = 10.dp, horizontal = 12.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Delete,
+                        contentDescription = null,
+                        tint = RoamLive,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(text = "Delete overlay", color = RoamLive, fontSize = 14.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LabeledSlider(
+    label: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    onChange: (Float) -> Unit,
+) {
+    Column {
+        Text(
+            text = "$label: ${value.toInt()}",
+            color = MaterialTheme.colorScheme.onBackground,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        // Snap to whole numbers: the readout shows integers and the anchor
+        // presets write exact values, so a continuous float here made "X: 50"
+        // quietly hold 50.6 and tapping Center shift the item by the hidden
+        // fraction. Snapping keeps slider, readout, and presets in agreement.
+        Slider(
+            value = value,
+            onValueChange = { onChange(it.roundToInt().toFloat()) },
+            valueRange = range,
+            colors = SliderDefaults.colors(
+                thumbColor = RoamLive,
+                activeTrackColor = RoamLive,
+            ),
+        )
+    }
+}
+
+/** Chips that append a live token ({time}/{date}/...) to the text. The token
+ *  shows as literal text in the field; the canvas and broadcast resolve it
+ *  live. FlowRow so the row wraps to a second line instead of squishing the
+ *  rightmost chip into a single-character column when there are more chips
+ *  than fit. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun TokenChips(onInsert: (String) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = "Insert live value",
+            color = MaterialTheme.colorScheme.onBackground,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OverlayTokens.tokens.forEach { (token, label) ->
+                Surface(
+                    onClick = { onInsert(token) },
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                ) {
+                    Text(
+                        text = label,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ColourPicker(selected: Int, onPick: (Int) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = "Colour",
+            color = MaterialTheme.colorScheme.onBackground,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TEXT_COLOURS.forEach { argb ->
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(Color(argb))
+                        .border(
+                            width = if (argb == selected) 2.5.dp else 1.dp,
+                            color = if (argb == selected) RoamLive else MaterialTheme.colorScheme.outline,
+                            shape = CircleShape,
+                        )
+                        .clickable { onPick(argb) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AnchorGrid(
+    current: Pair<Float, Float>,
+    onPick: (Pair<Float, Float>) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        ANCHORS.chunked(3).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                row.forEach { (label, x, y) ->
+                    val isCurrent = current.first == x && current.second == y
+                    Surface(
+                        onClick = { onPick(x to y) },
+                        shape = RoundedCornerShape(6.dp),
+                        color = if (isCurrent) RoamLive else MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.size(54.dp),
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(
+                                text = label,
+                                color = if (isCurrent) Color.White else MaterialTheme.colorScheme.onBackground,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SectionLabel(text: String) {
+    Text(
+        text = text.uppercase(),
+        color = MaterialTheme.colorScheme.onBackground,
+        fontSize = 13.sp,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 1.6.sp,
+    )
+}
+
+/** One-time heads-up before the location permission prompt fires, shown when a
+ *  scene about to be saved uses a GPS-backed token. Cost note here; the long
+ *  form lives in the website FAQ. After this, the user gets the standard
+ *  Android permission prompt. */
+@Composable
+private fun GpsTokenWarningDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("This overlay uses GPS") },
+        text = {
+            Text(
+                "One of your overlays uses a GPS-backed value (speed, " +
+                    "altitude, location, or city). GPS needs the location " +
+                    "permission and adds real battery and heat cost while " +
+                    "you're streaming.\n\n" +
+                    "The next prompt is Android asking you to allow location. " +
+                    "\"While using the app\" is enough; Roam never uses " +
+                    "location in the background. Approximate location works, " +
+                    "but speed, altitude, and heading may be unavailable unless " +
+                    "you choose precise location.\n\n" +
+                    "Skip to save without GPS (the tokens will show \"-\" " +
+                    "until you grant the permission).",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("Continue") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Skip") }
+        },
+    )
+}
+
+/** One-time notice shown before the user's first web overlay, so the battery
+ *  and heat cost is an informed choice rather than a surprise. */
+@Composable
+private fun WebOverlayWarningDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Web overlays use more power") },
+        text = {
+            Text(
+                "A web overlay runs a live web page, so it uses more battery and " +
+                    "heats your phone faster than text or image overlays.\n\n" +
+                    "For a logo, frame, or any static graphic, use an Image overlay. " +
+                    "For a title or fixed text, use a Text overlay. Both are far " +
+                    "lighter.\n\n" +
+                    "Add a web overlay only for what those can't do: alerts, chat, " +
+                    "follower goals, or other live web content. Only HTTPS addresses " +
+                    "are accepted. Imported HTML can run code and make internet " +
+                    "requests, so only import files you trust.",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("Add web overlay") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}

@@ -1,0 +1,51 @@
+# Android and Gradle outputs
+.gradle/
+.kotlin/
+**/build/
+.cxx/
+.externalNativeBuild/
+captures/
+local.properties
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.direnv/
+.envrc
+*.iml
+*.swp
+*.swo
+*~
+*.bak
+*.orig
+.DS_Store
+Thumbs.db
+
+# Local credentials and signing material
+.env
+.env.*
+!.env.example
+keystore.properties
+secrets.properties
+google-services.json
+service-account*.json
+*firebase-adminsdk*.json
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+*.pkcs8
+*.pkcs12
+
+# Generated release artifacts and logs
+*.apk
+*.aab
+*.aar
+*.ap_
+*.log
+*.hprof
+hs_err_pid*
+mapping.txt
+output-metadata.json

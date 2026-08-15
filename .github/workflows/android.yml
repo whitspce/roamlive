@@ -1,0 +1,58 @@
+name: Android CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Install Android SDK packages
+        run: >-
+          sdkmanager --install
+          "platforms;android-37.0"
+          "build-tools;36.0.0"
+
+      - name: Test, lint, and assemble
+        env:
+          ROAM_STORE_FILE: ""
+          ROAM_STORE_PASSWORD: ""
+          ROAM_KEY_ALIAS: ""
+          ROAM_KEY_PASSWORD: ""
+        run: |
+          ./gradlew --no-daemon --dependency-verification=strict \
+            :app:testDebugUnitTest \
+            :rtmp:testDebugUnitTest \
+            :srt:testDebugUnitTest \
+            :app:lintDebug \
+            :app:lintRelease \
+            :rtmp:lintDebug \
+            :rtmp:lintRelease \
+            :srt:lintDebug \
+            :srt:lintRelease \
+            :app:assembleDebug \
+            :app:assembleRelease

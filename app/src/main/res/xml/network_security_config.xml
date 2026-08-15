@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  OBS WebSocket uses ws:// on user-selected private-network hosts. Android's
+  domain allowlists cannot enumerate those addresses, so cleartext permission
+  is global even though Roam's own web requests use HTTPS. OBS authentication
+  and the private network provide the protection; this flag does not.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
