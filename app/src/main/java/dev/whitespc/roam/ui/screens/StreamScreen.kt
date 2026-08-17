@@ -53,6 +53,7 @@ import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -61,6 +62,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -131,30 +133,16 @@ fun StreamScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     // Bumped every time a settings-layer screen closes. StreamSurface is never
     // unmounted (Settings/Overlays draw on top of it), so its remember{} prefs
-    // reads would otherwise be captured once per process and go stale: chat
-    // panel toggles wouldn't show until restart, and the Go Live button could
-    // sit dark for minutes after the first URL save (it only re-evaluated when
-    // an unrelated recomposition happened to come along). Keying the reads on
-    // this revision refreshes them at the moment settings can have changed.
+    // reads would otherwise be captured once per process and go stale. Keying
+    // those reads on this revision refreshes them when settings change.
     var configRevision by remember { mutableIntStateOf(0) }
-    val destinationReady = remember(configRevision) {
-        validateStreamEndpoint(Prefs.streamUrl(context)) is StreamEndpointValidation.Valid
-    }
 
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background),
     ) {
-        if (!destinationReady) {
-            FirstRunSetupScreen(
-                onComplete = {
-                    screen = Screen.Main
-                    configRevision++
-                },
-            )
-        } else {
-            PermissionGate {
+        PermissionGate {
             var bindAttempt by rememberSaveable { mutableIntStateOf(0) }
             when (val serviceBinding = rememberStreamingServiceBinding(bindAttempt)) {
                 StreamingServiceBinding.Connecting -> {
@@ -243,7 +231,6 @@ fun StreamScreen(modifier: Modifier = Modifier) {
                 }
             }
         }
-        }
     }
 }
 
@@ -311,7 +298,6 @@ private fun StreamSurface(
     val kickChannel = remember(configRevision) { Prefs.kickChannel(context) }
     val twitchChannel = remember(configRevision) { Prefs.twitchChannel(context) }
     val youtubeChannel = remember(configRevision) { Prefs.youtubeChannel(context) }
-    val streamUrl = remember(configRevision) { Prefs.streamUrl(context) }
     val chatMessages by ChatManager.messages.collectAsState()
 
     // Android 13+ hides foreground-service notifications, including our safe
@@ -466,6 +452,7 @@ private fun StreamSurface(
     var stealthActive by remember { mutableStateOf(false) }
     var scenePickerOpen by remember { mutableStateOf(false) }
     var micPanelOpen by remember { mutableStateOf(false) }
+    var destinationNeededOpen by rememberSaveable { mutableStateOf(false) }
     // Critical heat asks for the screen to go dark: the display is a real heat
     // source and stealth buys cooling time before the engine's last-resort stop.
     val stealthRequested by engine.stealthRequested.collectAsState()
@@ -903,21 +890,45 @@ private fun StreamSurface(
                 )
             }
 
-            // streamUrl is the configRevision-keyed read from above, so this
-            // re-evaluates the moment Settings closes. (This staleness was the
-            // intermittent dark Go Live button: the old per-recomposition read
-            // only re-ran when battery/thermal happened to tick.)
-            val canGoLive = streamActive || streamUrl.isNotBlank()
             LiveButton(
                 state = state,
-                enabled = canGoLive,
                 onGoLive = {
-                    startWithBackgroundStopControl(Prefs.streamUrl(context))
+                    val destination = Prefs.streamUrl(context)
+                    if (validateStreamEndpoint(destination) is StreamEndpointValidation.Valid) {
+                        startWithBackgroundStopControl(destination)
+                    } else {
+                        destinationNeededOpen = true
+                    }
                 },
                 onStop = onStopSession,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 24.dp),
+            )
+        }
+
+        if (destinationNeededOpen) {
+            AlertDialog(
+                onDismissRequest = { destinationNeededOpen = false },
+                title = { Text("Stream destination needed") },
+                text = {
+                    Text("Enter a valid Stream URL in Settings > Stream before going live.")
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            destinationNeededOpen = false
+                            onOpenSettings()
+                        },
+                    ) {
+                        Text("Open settings")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { destinationNeededOpen = false }) {
+                        Text("Not now")
+                    }
+                },
             )
         }
 
@@ -1554,7 +1565,6 @@ private const val HOLD_DURATION_MS = 800
 @Composable
 private fun LiveButton(
     state: StreamState,
-    enabled: Boolean,
     onGoLive: () -> Unit,
     onStop: () -> Unit,
     modifier: Modifier = Modifier,
@@ -1562,16 +1572,8 @@ private fun LiveButton(
     val streaming = state is StreamState.Live ||
         state == StreamState.Connecting ||
         state is StreamState.Reconnecting
-    val backgroundColor = when {
-        !enabled -> MaterialTheme.colorScheme.surfaceVariant
-        streaming -> RoamLive
-        else -> MaterialTheme.colorScheme.primary
-    }
-    val textColor = when {
-        !enabled -> MaterialTheme.colorScheme.onSurfaceVariant
-        streaming -> Color.White
-        else -> MaterialTheme.colorScheme.onPrimary
-    }
+    val backgroundColor = if (streaming) RoamLive else MaterialTheme.colorScheme.primary
+    val textColor = if (streaming) Color.White else MaterialTheme.colorScheme.onPrimary
     val progress = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
 
@@ -1582,8 +1584,7 @@ private fun LiveButton(
     Box(
         modifier = modifier
             .size(104.dp)
-            .pointerInput(streaming, enabled) {
-                if (!enabled) return@pointerInput
+            .pointerInput(streaming) {
                 if (streaming) {
                     detectTapGestures(onTap = { onStop() })
                 } else {

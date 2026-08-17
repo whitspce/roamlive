@@ -8,6 +8,11 @@ import org.junit.Test
 class StreamEndpointTest {
 
     @Test
+    fun `blank destination is rejected before streaming starts`() {
+        assertProblem("", StreamEndpointProblem.EMPTY)
+    }
+
+    @Test
     fun `secure RTMP transports require a host and meaningful path`() {
         assertValid(
             "rtmps://live.example.test/app/test-stream-key",

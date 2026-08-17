@@ -15,7 +15,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -48,8 +47,7 @@ import dev.whitespc.roam.streaming.validateStreamEndpoint
 import dev.whitespc.roam.ui.theme.RoamLive
 
 /** Where the stream goes. The URL format documentation lives behind the "?"
- *  popup instead of filling the pane; the dashboard shortcuts sit at the
- *  bottom because title and category are a platform-side job. */
+ *  popup instead of filling the pane. */
 @Composable
 internal fun StreamPane(isLive: Boolean) {
     val context = LocalContext.current
@@ -171,20 +169,6 @@ internal fun StreamPane(isLive: Boolean) {
                 }
             }
         }
-        Spacer(modifier = Modifier.height(10.dp))
-        SubHeading("Stream title")
-        LinkRow(
-            icon = Icons.Filled.Edit,
-            label = "Twitch dashboard",
-            description = "Edit your Twitch title, category, and tags.",
-            url = "https://dashboard.twitch.tv",
-        )
-        LinkRow(
-            icon = Icons.Filled.Edit,
-            label = "Kick dashboard",
-            description = "Edit your Kick title and category.",
-            url = "https://kick.com/dashboard",
-        )
     }
 
     if (saveDialogOpen) {
