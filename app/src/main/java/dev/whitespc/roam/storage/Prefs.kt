@@ -1,6 +1,7 @@
 package dev.whitespc.roam.storage
 
 import android.content.Context
+import dev.whitespc.roam.streaming.MAX_STREAM_ENDPOINT_LENGTH
 import dev.whitespc.roam.streaming.StreamEndpointValidation
 import dev.whitespc.roam.streaming.validateStreamEndpoint
 import dev.whitespc.roam.streaming.overlay.OverlayJson
@@ -14,7 +15,10 @@ object Prefs {
     /** Keystore-encrypted stream URL. Plaintext [KEY_STREAM_URL] migrates here
      *  on first read and is removed. */
     private const val KEY_STREAM_URL_ENC = "stream_url_enc"
+    private const val KEY_STREAM_URL_DRAFT_ENC = "stream_url_draft_enc"
+    private const val KEY_STREAM_URL_EDIT_PENDING = "stream_url_edit_pending"
     private const val SECRET_PURPOSE_STREAM_URL = "stream-url"
+    private const val SECRET_PURPOSE_STREAM_URL_DRAFT = "stream-url-draft"
     private const val SECRET_PURPOSE_OBS_PASSWORD = "obs-password"
     // Legacy split-field keys, kept for one-time migration into the single URL.
     private const val KEY_SERVER_URL = "server_url"
@@ -82,6 +86,10 @@ object Prefs {
         if (sp(context).contains("stream_url_2")) {
             sp(context).edit().remove("stream_url_2").apply()
         }
+        // A secure editor write that could not complete must fail closed. Keep
+        // the old ciphertext recoverable, but never let Go Live use it while
+        // the user believes a different destination is being edited.
+        if (sp(context).getBoolean(KEY_STREAM_URL_EDIT_PENDING, false)) return ""
         val encrypted = sp(context).getString(KEY_STREAM_URL_ENC, null)
         if (encrypted != null) {
             SecretStore.decrypt(encrypted, SECRET_PURPOSE_STREAM_URL)?.let { plaintext ->
@@ -97,19 +105,82 @@ object Prefs {
         }
         val plaintext = sp(context).getString(KEY_STREAM_URL, "") ?: ""
         if (plaintext.isNotBlank()) {
-            setStreamUrl(context, plaintext)
-            return plaintext
+            return if (setStreamUrl(context, plaintext)) plaintext else ""
         }
         val server = (sp(context).getString(KEY_SERVER_URL, "") ?: "").trim().trimEnd('/')
         val key = (sp(context).getString(KEY_STREAM_KEY, "") ?: "").trim()
         if (server.isNotBlank() && key.isNotBlank()) {
             val combined = "$server/$key"
-            setStreamUrl(context, combined)
-            return combined
+            return if (setStreamUrl(context, combined)) combined else ""
         }
         return ""
     }
 
+    /**
+     * Value shown in the Stream URL editor. An incomplete URL is kept as a
+     * separate encrypted draft so leaving Settings cannot erase the user's
+     * work. Streaming code must continue to read [streamUrl], never this.
+     */
+    fun editableStreamUrl(context: Context): String {
+        val encrypted = sp(context).getString(KEY_STREAM_URL_DRAFT_ENC, null)
+        if (encrypted != null) {
+            SecretStore.decrypt(encrypted, SECRET_PURPOSE_STREAM_URL_DRAFT)?.let { draft ->
+                if (SecretStore.needsMigration(encrypted)) {
+                    SecretStore.encrypt(draft, SECRET_PURPOSE_STREAM_URL_DRAFT)?.let { migrated ->
+                        sp(context).edit().putString(KEY_STREAM_URL_DRAFT_ENC, migrated).apply()
+                    }
+                }
+                return draft.take(MAX_STREAM_ENDPOINT_LENGTH + 1)
+            }
+        }
+        return streamUrl(context)
+    }
+
+    /**
+     * Persist one editor change without ever making an invalid draft active.
+     * All related keys change in one preference transaction after encryption
+     * succeeds. On encryption failure, existing ciphertext is retained for
+     * recovery and a non-secret marker blocks Go Live.
+     */
+    @Synchronized
+    fun setEditableStreamUrl(context: Context, input: String): Boolean {
+        val candidate = input.take(MAX_STREAM_ENDPOINT_LENGTH + 1)
+        val preferences = sp(context)
+        return when (streamUrlStorageTarget(candidate)) {
+            StreamUrlStorageTarget.CLEAR -> {
+                clearStreamUrl(context)
+                true
+            }
+            StreamUrlStorageTarget.ACTIVE -> {
+                val encrypted = SecretStore.encrypt(candidate, SECRET_PURPOSE_STREAM_URL)
+                    ?: return clearStreamUrlAfterFailure(context)
+                preferences.edit()
+                    .putString(KEY_STREAM_URL_ENC, encrypted)
+                    .remove(KEY_STREAM_URL_DRAFT_ENC)
+                    .remove(KEY_STREAM_URL_EDIT_PENDING)
+                    .remove(KEY_STREAM_URL)
+                    .remove(KEY_SERVER_URL)
+                    .remove(KEY_STREAM_KEY)
+                    .apply()
+                true
+            }
+            StreamUrlStorageTarget.DRAFT -> {
+                val encrypted = SecretStore.encrypt(candidate, SECRET_PURPOSE_STREAM_URL_DRAFT)
+                    ?: return clearStreamUrlAfterFailure(context)
+                preferences.edit()
+                    .putString(KEY_STREAM_URL_DRAFT_ENC, encrypted)
+                    .remove(KEY_STREAM_URL_ENC)
+                    .putBoolean(KEY_STREAM_URL_EDIT_PENDING, true)
+                    .remove(KEY_STREAM_URL)
+                    .remove(KEY_SERVER_URL)
+                    .remove(KEY_STREAM_KEY)
+                    .apply()
+                true
+            }
+        }
+    }
+
+    @Synchronized
     fun setStreamUrl(context: Context, url: String): Boolean {
         if (url.isEmpty()) {
             clearStreamUrl(context)
@@ -123,11 +194,12 @@ object Prefs {
         }
         val encrypted = SecretStore.encrypt(url, SECRET_PURPOSE_STREAM_URL)
         if (encrypted == null) {
-            clearStreamUrl(context)
-            return false
+            return clearStreamUrlAfterFailure(context)
         }
         sp(context).edit()
             .putString(KEY_STREAM_URL_ENC, encrypted)
+            .remove(KEY_STREAM_URL_DRAFT_ENC)
+            .remove(KEY_STREAM_URL_EDIT_PENDING)
             .remove(KEY_STREAM_URL)
             .remove(KEY_SERVER_URL)
             .remove(KEY_STREAM_KEY)
@@ -138,10 +210,25 @@ object Prefs {
     private fun clearStreamUrl(context: Context) {
         sp(context).edit()
             .remove(KEY_STREAM_URL_ENC)
+            .remove(KEY_STREAM_URL_DRAFT_ENC)
+            .remove(KEY_STREAM_URL_EDIT_PENDING)
             .remove(KEY_STREAM_URL)
             .remove(KEY_SERVER_URL)
             .remove(KEY_STREAM_KEY)
             .apply()
+    }
+
+    private fun clearStreamUrlAfterFailure(context: Context): Boolean {
+        // Do not destroy the previous active URL or last encrypted draft when
+        // Android Keystore is temporarily unavailable. The marker keeps both
+        // inaccessible to streaming until a later secure save succeeds.
+        sp(context).edit()
+            .putBoolean(KEY_STREAM_URL_EDIT_PENDING, true)
+            .remove(KEY_STREAM_URL)
+            .remove(KEY_SERVER_URL)
+            .remove(KEY_STREAM_KEY)
+            .apply()
+        return false
     }
 
     /**

@@ -28,6 +28,10 @@ internal enum class StreamEndpointProblem(val userMessage: String) {
     MISSING_SRT_STREAM_ID("SRT destination must include a path or streamid"),
     MISSING_SRT_PASSPHRASE("SRT destination must include a passphrase"),
     INVALID_SRT_PASSPHRASE("SRT passphrase must be 10 to 79 characters"),
+    SRT_LISTENER_URL_NOT_ALLOWED(
+        "That URL is for the OBS listener. Tap the help icon for the Roam phone URL",
+    ),
+    SRT_MODE_NOT_ALLOWED("Remove mode from the phone URL. Roam connects automatically"),
     UNKNOWN_SRT_PARAMETER("SRT destination contains an unsupported parameter"),
     DUPLICATE_SRT_PARAMETER("SRT destination contains a duplicate parameter"),
     INVALID_SRT_KEY_LENGTH("SRT pbkeylen must be 128, 192, or 256"),
@@ -146,6 +150,12 @@ private fun parseSrtParameters(rawQuery: String?): SrtParametersResult {
         val value = part.substringAfter('=', missingDelimiterValue = "")
         if (name.hasForbiddenCharacters() || value.hasForbiddenCharacters()) {
             return SrtParametersResult.Invalid(StreamEndpointProblem.INVALID_CHARACTERS)
+        }
+        if (name == "mode" && value.equals("listener", ignoreCase = true)) {
+            return SrtParametersResult.Invalid(StreamEndpointProblem.SRT_LISTENER_URL_NOT_ALLOWED)
+        }
+        if (name == "mode") {
+            return SrtParametersResult.Invalid(StreamEndpointProblem.SRT_MODE_NOT_ALLOWED)
         }
         if (name !in allowedNames) {
             return SrtParametersResult.Invalid(StreamEndpointProblem.UNKNOWN_SRT_PARAMETER)

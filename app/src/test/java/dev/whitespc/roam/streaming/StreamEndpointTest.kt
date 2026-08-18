@@ -100,9 +100,20 @@ class StreamEndpointTest {
     @Test
     fun `SRT query parameters reject unknown names and duplicates`() {
         assertProblem(
+            "srt://studio.example.test:1234" +
+                "?mode=listener&passphrase=test-passphrase-123" +
+                "&pbkeylen=32&latency=2000000",
+            StreamEndpointProblem.SRT_LISTENER_URL_NOT_ALLOWED,
+        )
+        assertProblem(
+            "srt://studio.example.test:1234/live" +
+                "?passphrase=test-passphrase-123&mode=LISTENER",
+            StreamEndpointProblem.SRT_LISTENER_URL_NOT_ALLOWED,
+        )
+        assertProblem(
             "srt://studio.example.test:1234/live" +
                 "?passphrase=test-passphrase-123&mode=caller",
-            StreamEndpointProblem.UNKNOWN_SRT_PARAMETER,
+            StreamEndpointProblem.SRT_MODE_NOT_ALLOWED,
         )
         assertProblem(
             "srt://studio.example.test:1234/live" +

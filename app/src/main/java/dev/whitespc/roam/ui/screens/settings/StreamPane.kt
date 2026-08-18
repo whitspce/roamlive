@@ -51,7 +51,7 @@ import dev.whitespc.roam.ui.theme.RoamLive
 @Composable
 internal fun StreamPane(isLive: Boolean) {
     val context = LocalContext.current
-    val initialStreamUrl = remember { Prefs.streamUrl(context) }
+    val initialStreamUrl = remember { Prefs.editableStreamUrl(context) }
     var streamUrl by remember { mutableStateOf(initialStreamUrl) }
     var helpOpen by remember { mutableStateOf(false) }
     var destsVersion by remember { mutableIntStateOf(0) }
@@ -71,21 +71,16 @@ internal fun StreamPane(isLive: Boolean) {
         UrlField(
             streamUrl = streamUrl,
             onStreamUrlChange = {
-                streamUrl = it.take(MAX_STREAM_ENDPOINT_LENGTH + 1)
-                val validation = validateStreamEndpoint(it)
+                val candidate = it.take(MAX_STREAM_ENDPOINT_LENGTH + 1)
+                streamUrl = candidate
+                val validation = validateStreamEndpoint(candidate)
+                val savedSecurely = Prefs.setEditableStreamUrl(context, candidate)
                 streamError = when {
-                    it.isEmpty() -> {
-                        Prefs.setStreamUrl(context, "")
-                        null
-                    }
-                    validation is StreamEndpointValidation.Invalid -> {
-                        // Clear the old active credential so a later Go Live
-                        // tap cannot silently use it after an invalid edit.
-                        Prefs.setStreamUrl(context, it)
+                    !savedSecurely ->
+                        "Could not save securely. Keep Roam open and try again."
+                    candidate.isEmpty() -> null
+                    validation is StreamEndpointValidation.Invalid ->
                         validation.problem.userMessage
-                    }
-                    !Prefs.setStreamUrl(context, it) ->
-                        "Could not save securely. Try again."
                     else -> null
                 }
             },
@@ -268,11 +263,15 @@ internal fun StreamPane(isLive: Boolean) {
                         "Direct: combine the platform's RTMPS server URL and " +
                         "stream key.\n" +
                         "rtmps://server.example/app/stream-key\n\n" +
-                        "Home Studio: use the private-network SRT address from " +
-                        "the OBS setup guide. Include a generated passphrase.\n" +
+                        "Home Studio: enter the Roam phone URL here, not the " +
+                        "OBS listener URL. Use the same SRT passphrase in Roam " +
+                        "and OBS. Do not reuse the OBS WebSocket password.\n" +
                         "srt://100.64.0.10:1234/live?passphrase=" +
                         "YOUR_RANDOM_PASSPHRASE&pbkeylen=256&latency=2000\n" +
-                        "Replace the uppercase placeholder.\n\n" +
+                        "Replace the example IP with your computer's Tailscale " +
+                        "IP. Replace the uppercase passphrase with 20 or more " +
+                        "random letters and numbers. OBS uses different listener " +
+                        "values.\n\n" +
                         "Plain RTMP and SRT without a passphrase are blocked.",
                     fontSize = 13.sp,
                 )
