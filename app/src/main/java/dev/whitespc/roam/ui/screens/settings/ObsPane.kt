@@ -157,7 +157,7 @@ internal fun ObsPane() {
         )
         if (obsScenes.isNotEmpty()) {
             Text(
-                text = "Available scenes (tap to use):",
+                text = "Choose the scene used for BRB:",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 11.sp,
             )

@@ -449,10 +449,12 @@ private fun StreamSurface(
     // see UpdateChecker). Runs once per process, result shown as a banner.
     var updateOffer by remember { mutableStateOf<UpdateChecker.Update?>(null) }
     LaunchedEffect(Unit) { updateOffer = UpdateChecker.maybeCheck(context) }
+    val obsStartScope = rememberCoroutineScope()
     var stealthActive by remember { mutableStateOf(false) }
     var scenePickerOpen by remember { mutableStateOf(false) }
     var micPanelOpen by remember { mutableStateOf(false) }
     var destinationNeededOpen by rememberSaveable { mutableStateOf(false) }
+    var obsStartConfirmationOpen by rememberSaveable { mutableStateOf(false) }
     // Critical heat asks for the screen to go dark: the display is a real heat
     // source and stealth buys cooling time before the engine's last-resort stop.
     val stealthRequested by engine.stealthRequested.collectAsState()
@@ -880,11 +882,12 @@ private fun StreamSurface(
                         scenePickerOpen = false
                     },
                     onToggleStream = {
-                        scope.launch {
-                            if (pickerStreaming) ObsClient.stopStream()
-                            else ObsClient.startStream()
+                        if (pickerStreaming) {
+                            scope.launch { ObsClient.stopStream() }
+                            scenePickerOpen = false
+                        } else {
+                            obsStartConfirmationOpen = true
                         }
-                        scenePickerOpen = false
                     },
                     onDismiss = { scenePickerOpen = false },
                 )
@@ -927,6 +930,35 @@ private fun StreamSurface(
                 dismissButton = {
                     TextButton(onClick = { destinationNeededOpen = false }) {
                         Text("Not now")
+                    }
+                },
+            )
+        }
+
+        if (obsStartConfirmationOpen) {
+            AlertDialog(
+                onDismissRequest = { obsStartConfirmationOpen = false },
+                title = { Text("Start OBS streaming?") },
+                text = {
+                    Text(
+                        "This starts OBS's configured stream and may broadcast publicly. " +
+                            "Check the destination in OBS before continuing.",
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            obsStartConfirmationOpen = false
+                            scenePickerOpen = false
+                            obsStartScope.launch { ObsClient.startStream() }
+                        },
+                    ) {
+                        Text("Start streaming")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { obsStartConfirmationOpen = false }) {
+                        Text("Cancel")
                     }
                 },
             )
